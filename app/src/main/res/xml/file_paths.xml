@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 公共下载目录（浏览器下载文件打开/分享） -->
+    <external-path name="downloads" path="Download/" />
+    <!-- 应用外部专属目录 -->
+    <external-files-path name="external_files" path="." />
+    <!-- 内部文件目录 -->
+    <files-path name="internal_files" path="." />
+    <!-- 缓存目录（blob 临时文件） -->
+    <cache-path name="cache" path="." />
+</paths>

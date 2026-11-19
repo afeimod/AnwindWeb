@@ -98,15 +98,18 @@ object WindowManager {
     }
 
     /** 窗口置前（独立版无多窗口，no-op；保留契约）。 */
+    @Suppress("UNUSED_PARAMETER")
     fun focus(id: String) {
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun toggleTrueFullscreen(id: String) {
         // 独立版：窗口不在列表（恒空）→ BrowserContent 走
         // isTrueFullscreen 直写 + 手动重组分支，与原安卓全屏页一致
         notifyChanged()
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun close(id: String) {
         notifyChanged()
     }

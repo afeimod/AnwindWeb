@@ -175,6 +175,10 @@ object BrowserEngine {
         }
     }
 
+    // v1.2.3：allowFileAccessFromFileURLs / allowUniversalAccessFromFileURLs
+    // 已废弃但无等价替代（官方推荐 WebViewAssetLoader 迁移成本高）——
+    // 本地 HTML（content:// SAF）与 Ruffle 本地资产供给依赖它们，保留并抑制告警
+    @Suppress("DEPRECATION")
     private fun configure(wv: WebView, tab: BrowserTab, manager: TabManager) {
         val ctx = wv.context
         wv.settings.apply {
@@ -1477,9 +1481,9 @@ object BrowserEngine {
             filePathCallback: android.webkit.ValueCallback<Array<Uri>>?,
             fileChooserParams: FileChooserParams?
         ): Boolean {
-            // LinBrowser 独立版：FileChooserBus 登记 + startActivityForResult，
-            // 结果由 MainActivity.onActivityResult → FileChooserBus 回传页面
-            return FileChooserBus.launch(ctx, filePathCallback, fileChooserParams)
+            // LinBrowser 独立版：FileChooserBus 登记 + Activity Result launcher，
+            // 结果由 launcher 回调 → FileChooserBus.onResult 回传页面（v1.2.3）
+            return FileChooserBus.launch(filePathCallback, fileChooserParams)
         }
     }
 }

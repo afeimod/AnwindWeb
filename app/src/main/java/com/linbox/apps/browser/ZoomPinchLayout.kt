@@ -99,6 +99,11 @@ class ZoomPinchLayout @JvmOverloads constructor(
 
     private var webView: WebView? = null
 
+    /** 页面当前缩放。WebView.getScale() 已废弃但无等价 getter 替代
+     *  （官方指引 onScaleChanged 跟踪；捏合仲裁只需近似值，保留原语义）。 */
+    @Suppress("DEPRECATION")
+    private fun pageScale(): Float = webView?.scale ?: 0f
+
     // ===== v2.16.3：鼠标视角（3D 视角旋转）旁路观察 =====
     // 参照 GameBox：不拦截触摸（页面照常收到 tap/click/touch，游戏自身
     // 触摸逻辑不受影响），把单指拖动增量喂给 View3dController；拖动时
@@ -517,7 +522,7 @@ class ZoomPinchLayout @JvmOverloads constructor(
                     mode = MODE_OBSERVE
                     observeViewDomain = viewZoom < 1f
                     baseSpan = freeSpanOf(ev)
-                    lastScale = webView?.scale ?: 0f
+                    lastScale = pageScale()
                     deadSamples = 0
                 }
             }
@@ -545,7 +550,7 @@ class ZoomPinchLayout @JvmOverloads constructor(
                         }
                         return false
                     }
-                    val cur = webView?.scale ?: 0f
+                    val cur = pageScale()
                     // 页面 scale 是否仍在变化（原生捏合在响应中）。
                     // 监控"最近"而非"手势开始以来"的响应：原生从 250% 缩到
                     // 100% 地板后 scale 冻结，同一次手势可无缝接管进 30%。
@@ -578,7 +583,7 @@ class ZoomPinchLayout @JvmOverloads constructor(
                 } else if (mode == MODE_OBSERVE) {
                     // 指数变化（3 指余 2）：重基线，不丢失后续合法捏合
                     baseSpan = freeSpanOf(ev, liftedIdx)
-                    lastScale = webView?.scale ?: 0f
+                    lastScale = pageScale()
                     deadSamples = 0
                 }
             }

@@ -227,17 +227,13 @@ internal fun BrowserContent(scope: WindowContentScope) {
             }
 
             // ===== 工具栏（真全屏时隐藏；点左上角悬浮按钮或按返回键恢复窗口） =====
+            // v1.2.3：后退/前进/刷新/主页/书签页/历史页/UA/全屏/3D视角等动作
+            // 已全部并入悬浮球「浏览器快捷」组（下方 BrowserQuickBus 注册），
+            // Toolbar 只保留地址栏 + 前往 + 收藏 —— 参数相应精简。
             if (!isFullscreen) {
                 Toolbar(
                     address = tabManager.addressInput,
                     onAddressChange = { tabManager.addressInput = it },
-                    onBack = { tabManager.getTab(tabManager.activeTabId)?.goBack() },
-                    onForward = { tabManager.getTab(tabManager.activeTabId)?.goForward() },
-                    onRefresh = { tabManager.getTab(tabManager.activeTabId)?.refresh() },
-                    onHome = {
-                        tabManager.getTab(tabManager.activeTabId)?.loadUrl(defaultHome)
-                        tabManager.addressInput = if (defaultHome == "linbox://home") "" else defaultHome
-                    },
                     onGo = {
                         val url = normalizeUrl(tabManager.addressInput)
                         val tab = tabManager.getTab(tabManager.activeTabId)
@@ -275,14 +271,7 @@ internal fun BrowserContent(scope: WindowContentScope) {
                                 }
                             }
                         }
-                    },
-                    onShowBookmarks = { showBookmarks = !showBookmarks },
-                    onShowHistory = { showHistory = !showHistory },
-                    uaMode = uaMode,
-                    onToggleUaMode = { toggleUaMode() },
-                    isFullscreen = isFullscreen,
-                    onToggleFullscreen = { toggleFullscreen() },
-                    onOpenView3d = { showView3dSettings = true }
+                    }
                 )
             }
 
@@ -1037,7 +1026,6 @@ private fun QuickLinkItem(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val theme = LocalWinTheme.current
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
@@ -1206,24 +1194,15 @@ object BrowserQuickBus {
 
 /**
  * 工具栏
+ * v1.2.3：动作并入悬浮球 BrowserQuickBus 后只留地址栏 + 前往 + 收藏，
+ * 移除未使用的回调参数（CI 零告警）。
  */
 @Composable
 private fun Toolbar(
     address: String,
     onAddressChange: (String) -> Unit,
-    onBack: () -> Unit,
-    onForward: () -> Unit,
-    onRefresh: () -> Unit,
-    onHome: () -> Unit,
     onGo: () -> Unit,
-    onBookmark: () -> Unit,
-    onShowBookmarks: () -> Unit,
-    onShowHistory: () -> Unit,
-    uaMode: String = "desktop",
-    onToggleUaMode: () -> Unit = {},
-    isFullscreen: Boolean = false,
-    onToggleFullscreen: () -> Unit = {},
-    onOpenView3d: () -> Unit = {}
+    onBookmark: () -> Unit
 ) {
     val theme = LocalWinTheme.current
     Row(

@@ -141,9 +141,6 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
     var pressed by remember { mutableStateOf(false) }
     var dragOffset by remember { mutableStateOf(Offset.Zero) }
 
-    // v5.0：键盘切换需要 Context（组合层取，回调内使用）
-    val context = androidx.compose.ui.platform.LocalContext.current
-
     // 闭包内保持最新引用（拖动结束时读取基准位置）
     val baseX by rememberUpdatedState(GamepadController.ballPosX)
     val baseY by rememberUpdatedState(GamepadController.ballPosY)

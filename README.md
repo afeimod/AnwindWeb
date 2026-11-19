@@ -2,7 +2,9 @@
 
 LinBox 浏览器独立版 —— 从 [LinBox](https://github.com/afeimod/linbox)（Windows 容器桌面）抽取的**独立安卓浏览器应用**，浏览器功能 100% 保留，虚拟手柄 / 悬浮球 / 虚拟键盘 / 触控板整套输入系统随行，并修复了下载相关的一批问题。
 
-> **v1.2.2（2025-11 更新）**：修复勾选多选上传不落位（vivo 等厂商照片/文件选择器勾选后按确认，页面收不到文件；点选单选正常）。根因：厂商选择器勾选多选的结果走 `ClipData` 且授权对 WebView 直读不总有效；修复：结果收集改为 data + ClipData 全量手动收集（不依赖 resultCode），回传前先复制到应用缓存目录再经 FileProvider 交给 WebView，彻底绕开厂商 provider 权限怪癖。
+> **v1.2.3（2025-11 更新）**：CI release 构建失败修复 + 零告警清理——**lintVitalRelease 致命错误 `ExpiredTargetSdkVersion`**（targetSdk 28 低于 Play 要求 33+；侧载分发不上 Play，该检查已关闭，targetSdk 28 保留是为了 legacy 存储直写公共 Downloads）；`onActivityResult` 迁移 Activity Result API（上传选择器改 launcher 回调，顺带修复大文件上传可能的主线程阻塞：复制移后台线程 + 会话一次性投递）；Toolbar 移除并入悬浮球的未用回调参数；`WebView.getScale()`/`allowFileAccessFromFileURLs` 等废弃 API 收敛到统一抑制点（保留原语义）；其余未用变量/参数全部清理。
+>
+> **v1.2.2**：修复勾选多选上传不落位（vivo 等厂商照片/文件选择器勾选后按确认，页面收不到文件；点选单选正常）。根因：厂商选择器勾选多选的结果走 `ClipData` 且授权对 WebView 直读不总有效；修复：结果收集改为 data + ClipData 全量手动收集（不依赖 resultCode），回传前先复制到应用缓存目录再经 FileProvider 交给 WebView，彻底绕开厂商 provider 权限怪癖。
 >
 > **v1.2.1**：修复 GitHub Actions 构建失败（源码包内残留沙箱本机 JDK 路径 `org.gradle.java.home`，CI 上必然失败；已移除并在 workflow 增加自清理步骤，误提交 `local.properties` 也不再挂）。含 v1.2.0 全部内容：① 应用图标换为用户指定图片（全密度 mipmap 重制）；② 主页横竖屏分流——竖屏用手机版主页（Logo + 大搜索栏 + 彩色宫格），横屏恢复经典桌面式主页；③ 悬浮球菜单重排为嵌套双箱盒（Box-in-Box）自适应布局，横屏显示不完整彻底修复；④ 修复文件/图片上传无法落位（FileChooserBus 统一登记 / 回传链路重写）；⑤ 主页自定义背景（悬浮球菜单可选图片或视频作主页背景）。
 >

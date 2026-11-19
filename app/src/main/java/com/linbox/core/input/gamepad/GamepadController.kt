@@ -579,11 +579,13 @@ object GamepadController {
     // 无卡键风险 —— pressMouseButton 恒 false，onButtonPress 走 JS 路径。
 
     /** 按下鼠标键（独立版无 X11 路由，恒 false = 走 dispatchMouse JS 路径） */
+    @Suppress("UNUSED_PARAMETER")
     fun pressMouseButton(actionCode: Int): Boolean {
         return false
     }
 
     /** 抬起鼠标键（JS 路径即时点击语义，无需配对抬起） */
+    @Suppress("UNUSED_PARAMETER")
     fun releaseMouseButton(actionCode: Int) {
     }
 

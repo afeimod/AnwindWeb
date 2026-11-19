@@ -16,13 +16,21 @@ android {
         applicationId = "com.linbox.browser"
         minSdk = 24
         targetSdk = 28
-        versionCode = 5
-        versionName = "1.2.2"
+        versionCode = 6
+        versionName = "1.2.3"
 
         // 无原生代码（termux PTY / DAC 桥已随容器栈移除）
         ndk {
             abiFilters.clear()
         }
+    }
+
+    // v1.2.3：lintVitalRelease 致命错误修复 —— targetSdk 28 是刻意保留的
+    //（与 LinBox 一致的 legacy 存储行为：公共 Downloads 直写可用，下载
+    // 三级回退依赖它）。本应用侧载分发不上 Google Play，Play 的
+    //「target API 33+」硬性要求不适用，关闭该检查（其余 lint 保持开启）。
+    lint {
+        disable += "ExpiredTargetSdkVersion"
     }
 
     // ruffle 资产按白名单打包（过滤旧版双引擎死重，与 LinBox 同规则）

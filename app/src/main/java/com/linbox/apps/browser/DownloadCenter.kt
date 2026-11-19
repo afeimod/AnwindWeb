@@ -40,7 +40,7 @@ import java.io.File
  *    startActivityForResult(intent, 0) 启动选择器，但全工程没有任何
  *    onActivityResult 把结果回传给 filePathCallback —— 选择文件后页面
  *    永远收不到结果（回调泄漏）。这里用 [FileChooserBus] 集中登记，
- *    MainActivity.onActivityResult 统一回传 onReceiveValue。
+ *    Activity Result launcher 回调统一回传 onReceiveValue（v1.2.3）。
  */
 
 // ===========================================================================
@@ -49,8 +49,8 @@ import java.io.File
 
 /**
  * WebView 文件选择回调总线：onShowFileChooser 登记回调 → 系统选择器 →
- * MainActivity.onActivityResult 回传结果。同一时刻只挂一个选择会话
- * （新会话开始时旧回调按取消收尾，防泄漏）。
+ * launcher 回调回传结果。同一时刻只挂一个选择会话（新会话开始时旧回调按
+ * 取消收尾，防泄漏）。
  *
  * v1.2.2 勾选多选不落位修复（vivo 等厂商选择器）：
  * - 厂商照片/文件选择器勾选多选时结果走 `ClipData`（`intent.data` 为空），
@@ -60,25 +60,44 @@ import java.io.File
  *   （点选单选恰好走得通，勾选批量则读不到）→ 回传前先复制到应用缓存目录，
  *   经 FileProvider（authorities=包名.fileprovider）交给 WebView，
  *   从根上绕开 provider 权限/授权怪癖；复制失败的单个文件回退原始 URI。
+ *
+ * v1.2.3：
+ * - 迁移 Activity Result API（`onActivityResult` 已废弃，CI 无告警）；
+ * - 会话一次性投递（取消 / 新会话 / 后台复制竞争安全）；
+ * - 复制移出主线程（大文件上传不再阻塞 UI / ANR），完成后回主线程投递。
  */
 object FileChooserBus {
-    private const val REQUEST_CODE = 0x6C62 // "lbr"
+    /** MainActivity 注入的上传选择器 launcher（onCreate 即注入）。 */
+    @Volatile
+    var launcher: androidx.activity.result.ActivityResultLauncher<Intent>? = null
 
-    private var pending: ValueCallback<Array<Uri>>? = null
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** 一次上传会话：保证回调恰好投递一次（竞争安全）。 */
+    private class Session(val cb: ValueCallback<Array<Uri>>) {
+        @Volatile var done = false
+        fun deliver(uris: Array<Uri>?) {
+            if (done) return
+            done = true
+            mainHandler.post { cb.onReceiveValue(uris) }
+        }
+    }
+
+    private var pending: Session? = null
 
     /**
      * 启动系统文件选择器（onShowFileChooser 专用）。
      * 返回 true = 已接手（WebView 不再走默认行为）。
      */
     fun launch(
-        ctx: Context,
         callback: ValueCallback<Array<Uri>>?,
         params: WebChromeClient.FileChooserParams?
     ): Boolean {
         if (callback == null) return false
-        // 旧会话未收尾 → 先按取消回传（防"上传一次后再也传不了"）
-        pending?.onReceiveValue(null)
-        pending = callback
+        // 旧会话未收尾 → 先按取消投递（防“上传一次后再也传不了”）
+        pending?.deliver(null)
+        val session = Session(callback)
+        pending = session
         val intent = try {
             params?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
@@ -93,39 +112,31 @@ object FileChooserBus {
         // v1.2.2：显式声明允许多选（createIntent 虽带，但部分厂商 ROM
         // 对该标志的读取有自己的实现，双保险后勾选界面必走 ClipData 返回）
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        val l = launcher
         return try {
-            val activity = ctx as? Activity
-                ?: com.linbox.util.ImmersiveMode.findActivity(ctx)
-            if (activity != null) {
-                // 同 Activity 内启动不需要 NEW_TASK（加 NEW_TASK 会导致结果
-                // 立即以 RESULT_CANCELED 回收 —— v1.1.0 之前的断链形态之一）
-                activity.startActivityForResult(intent, REQUEST_CODE)
+            if (l != null) {
+                l.launch(intent)
             } else {
-                // 拿不到 Activity 的兜底路径（理论上不会走到 —— WebView
-                // 以 Activity context 创建）：NEW_TASK 无结果回传，
-                // 页面按取消收尾，至少不悬挂回调
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                ctx.startActivity(intent)
+                // 兜底：launcher 未注入（MainActivity onCreate 即注入，理论
+                // 不可达）—— 直接按取消收尾，不悬挂回调
                 pending = null
-                callback.onReceiveValue(null)
+                session.deliver(null)
             }
             true
         } catch (_: Exception) {
             pending = null
-            callback.onReceiveValue(null)
+            session.deliver(null)
             false
         }
     }
 
-    /** MainActivity.onActivityResult 转发入口；返回 true = 已消费。 */
-    fun onActivityResult(
+    /** 上传选择器结果回传（MainActivity 的 launcher 回调入口）。 */
+    fun onResult(
         ctx: Context,
-        requestCode: Int,
         resultCode: Int,
         data: Intent?
-    ): Boolean {
-        if (requestCode != REQUEST_CODE) return false
-        val cb = pending ?: return true
+    ) {
+        val session = pending ?: return
         pending = null
 
         // ---- 1) 全量收集 URIs（不依赖 resultCode：厂商选择器勾选路径
@@ -155,16 +166,19 @@ object FileChooserBus {
         // ---- 2) 判定成功与否：resultCode OK 或收到了任何 URI 都算用户选了文件 ----
         val userPicked = resultCode == Activity.RESULT_OK || collected.isNotEmpty()
         if (!userPicked || collected.isEmpty()) {
-            cb.onReceiveValue(null)
-            return true
+            session.deliver(null)
+            return
         }
 
         // ---- 3) 复制到应用缓存 → FileProvider 交给 WebView ----
-        //      （厂商 provider 授权对 WebView 直读不总有效，勾选路径尤其如此；
-        //        复制失败的单个文件回退原始 URI，总比丢弃好）
-        val delivered = copyToCache(ctx, collected)
-        cb.onReceiveValue(delivered.toTypedArray())
-        return true
+        //      v1.2.3：复制移出主线程（大文件不阻塞 UI / ANR），
+        //      完成后回主线程投递（WebView 回调要求主线程）
+        val appCtx = ctx.applicationContext
+        Thread {
+            val delivered = runCatching { copyToCache(appCtx, collected) }
+                .getOrDefault(collected)
+            session.deliver(delivered.toTypedArray())
+        }.start()
     }
 
     /**
@@ -179,19 +193,19 @@ object FileChooserBus {
         val authority = ctx.packageName + ".fileprovider"
         val out = mutableListOf<Uri>()
         sources.forEachIndexed { index, src ->
-            var target: Uri? = null
-            try {
+            // v1.2.3：val try 表达式（消除「初始化冗余」告警）
+            val target: Uri? = try {
                 val name = displayName(ctx, src, index)
                 val dst = uniqueFile(dir, name)
                 ctx.contentResolver.openInputStream(src)?.use { input ->
                     dst.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
                 } ?: throw IllegalStateException("openInputStream returned null")
                 if (dst.length() <= 0L) throw IllegalStateException("empty copy")
-                target = runCatching {
+                runCatching {
                     androidx.core.content.FileProvider.getUriForFile(ctx, authority, dst)
                 }.getOrNull() ?: Uri.fromFile(dst)
             } catch (_: Exception) {
-                target = null
+                null
             }
             out.add(target ?: src)
         }

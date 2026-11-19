@@ -59,11 +59,24 @@ class MainActivity : ComponentActivity() {
         uri?.let { com.linbox.apps.browser.HomeBgManager.onPicked(this, it) }
     }
 
+    // v1.2.3：网页上传选择器（input[type=file]）迁移 Activity Result API
+    //（onActivityResult 已废弃；结果经 FileChooserBus 回传 WebView 页面）。
+    private val uploadPicker = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        com.linbox.apps.browser.FileChooserBus.onResult(
+            this, result.resultCode, result.data
+        )
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         // 选择器注入总线（主页按钮 → HomeBgManager.pick）
         com.linbox.apps.browser.HomeBgManager.pickerLauncher = homeBgPicker
+        // v1.2.3：上传选择器 launcher 注入（FileChooserBus.launch 经此启动，
+        // 替代已废弃的 startActivityForResult/onActivityResult 链）
+        com.linbox.apps.browser.FileChooserBus.launcher = uploadPicker
 
         // 全面屏沉浸式：内容绘制到状态栏/导航栏下方，并隐藏系统栏
         ImmersiveMode.applyTo(window)
@@ -208,21 +221,6 @@ class MainActivity : ComponentActivity() {
         if (hasFocus) {
             ImmersiveMode.applyTo(window)
         }
-    }
-
-    /**
-     * 网页文件选择器（input[type=file] 上传）结果回传：
-     * TabChromeClient.onShowFileChooser 经 FileChooserBus 登记
-     * filePathCallback，这里把用户选择结果回传给页面
-     * （修复原版"选完文件页面无响应"的断链 bug）。
-     */
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (com.linbox.apps.browser.FileChooserBus.onActivityResult(
-                this, requestCode, resultCode, data
-            )
-        ) return
-        super.onActivityResult(requestCode, resultCode, data)
     }
 
     /** 刘海屏绘制模式（API 28+）。 */

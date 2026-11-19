@@ -51,6 +51,15 @@ import java.io.File
  * WebView 文件选择回调总线：onShowFileChooser 登记回调 → 系统选择器 →
  * MainActivity.onActivityResult 回传结果。同一时刻只挂一个选择会话
  * （新会话开始时旧回调按取消收尾，防泄漏）。
+ *
+ * v1.2.2 勾选多选不落位修复（vivo 等厂商选择器）：
+ * - 厂商照片/文件选择器勾选多选时结果走 `ClipData`（`intent.data` 为空），
+ *   且部分机型 resultCode 不规范 → 结果收集改为「data + clipData 全量手动收集，
+ *   不依赖 resultCode」；
+ * - 厂商 provider 返回的 content:// URI 授权对 WebView 直读不总有效
+ *   （点选单选恰好走得通，勾选批量则读不到）→ 回传前先复制到应用缓存目录，
+ *   经 FileProvider（authorities=包名.fileprovider）交给 WebView，
+ *   从根上绕开 provider 权限/授权怪癖；复制失败的单个文件回退原始 URI。
  */
 object FileChooserBus {
     private const val REQUEST_CODE = 0x6C62 // "lbr"
@@ -81,6 +90,9 @@ object FileChooserBus {
                 type = "*/*"
             }
         }
+        // v1.2.2：显式声明允许多选（createIntent 虽带，但部分厂商 ROM
+        // 对该标志的读取有自己的实现，双保险后勾选界面必走 ClipData 返回）
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         return try {
             val activity = ctx as? Activity
                 ?: com.linbox.util.ImmersiveMode.findActivity(ctx)
@@ -115,10 +127,114 @@ object FileChooserBus {
         if (requestCode != REQUEST_CODE) return false
         val cb = pending ?: return true
         pending = null
-        val ok = resultCode == Activity.RESULT_OK
-        val uris = WebChromeClient.FileChooserParams.parseResult(resultCode, data)
-        cb.onReceiveValue(if (ok && uris != null && uris.isNotEmpty()) uris else null)
+
+        // ---- 1) 全量收集 URIs（不依赖 resultCode：厂商选择器勾选路径
+        //      常见 resultCode 不规范 + 结果只在 ClipData 里）----
+        val collected = mutableListOf<Uri>()
+        if (data != null) {
+            data.data?.let { if (it !in collected) collected.add(it) }
+            data.clipData?.let { cd ->
+                for (i in 0 until cd.itemCount) {
+                    val item = cd.getItemAt(i)
+                    item.uri?.let { if (it !in collected) collected.add(it) }
+                    item.intent?.data?.let { if (it !in collected) collected.add(it) }
+                    item.text?.toString()
+                        ?.takeIf { it.startsWith("content:") || it.startsWith("file:") }
+                        ?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                        ?.let { if (it !in collected) collected.add(it) }
+                }
+            }
+        }
+        // 官方 parseResult 兜底（结果放在意外位置时的标准解析）
+        if (collected.isEmpty()) {
+            runCatching {
+                WebChromeClient.FileChooserParams.parseResult(resultCode, data)
+            }.getOrNull()?.let { collected.addAll(it) }
+        }
+
+        // ---- 2) 判定成功与否：resultCode OK 或收到了任何 URI 都算用户选了文件 ----
+        val userPicked = resultCode == Activity.RESULT_OK || collected.isNotEmpty()
+        if (!userPicked || collected.isEmpty()) {
+            cb.onReceiveValue(null)
+            return true
+        }
+
+        // ---- 3) 复制到应用缓存 → FileProvider 交给 WebView ----
+        //      （厂商 provider 授权对 WebView 直读不总有效，勾选路径尤其如此；
+        //        复制失败的单个文件回退原始 URI，总比丢弃好）
+        val delivered = copyToCache(ctx, collected)
+        cb.onReceiveValue(delivered.toTypedArray())
         return true
+    }
+
+    /**
+     * 把选中的文件复制到 `cacheDir/uploads/<时间戳>/`，返回 FileProvider URI 列表。
+     * 单文件复制失败 → 该位置回退原始 URI（保持数量一致）。
+     */
+    private fun copyToCache(ctx: Context, sources: List<Uri>): List<Uri> {
+        val root = File(ctx.cacheDir, "uploads")
+        // 清掉上一轮上传临时目录（会话结束即无用，防缓存膨胀）
+        root.deleteRecursively()
+        val dir = File(root, System.currentTimeMillis().toString()).apply { mkdirs() }
+        val authority = ctx.packageName + ".fileprovider"
+        val out = mutableListOf<Uri>()
+        sources.forEachIndexed { index, src ->
+            var target: Uri? = null
+            try {
+                val name = displayName(ctx, src, index)
+                val dst = uniqueFile(dir, name)
+                ctx.contentResolver.openInputStream(src)?.use { input ->
+                    dst.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
+                } ?: throw IllegalStateException("openInputStream returned null")
+                if (dst.length() <= 0L) throw IllegalStateException("empty copy")
+                target = runCatching {
+                    androidx.core.content.FileProvider.getUriForFile(ctx, authority, dst)
+                }.getOrNull() ?: Uri.fromFile(dst)
+            } catch (_: Exception) {
+                target = null
+            }
+            out.add(target ?: src)
+        }
+        return out
+    }
+
+    /** 解析显示名：content:// 查 DISPLAY_NAME → lastPathSegment → 时间戳默认名。 */
+    private fun displayName(ctx: Context, uri: Uri, index: Int): String {
+        if (uri.scheme == "content") {
+            try {
+                ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                    val col = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (col >= 0 && c.moveToFirst()) {
+                        c.getString(col)?.takeIf { it.isNotBlank() }?.let { return sanitizeName(it) }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        uri.lastPathSegment?.substringAfterLast('/')
+            ?.takeIf { it.isNotBlank() }?.let { return sanitizeName(it) }
+        return "upload_${System.currentTimeMillis()}_$index"
+    }
+
+    /** 清洗文件名（去路径分隔符与非法字符，限长）。 */
+    private fun sanitizeName(raw: String): String {
+        val cleaned = raw.replace(Regex("[/\\\\:*?\"<>|\\n\\r\\t]"), "_").trim()
+        return if (cleaned.isBlank()) "upload_file" else cleaned.take(120)
+    }
+
+    /** 同名自动 (n) 后缀，避免多选同重名互相覆盖。 */
+    private fun uniqueFile(dir: File, name: String): File {
+        val f = File(dir, name)
+        if (!f.exists()) return f
+        val dot = name.lastIndexOf('.')
+        val base = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
+        var n = 1
+        while (true) {
+            val candidate = File(dir, "$base($n)$ext")
+            if (!candidate.exists()) return candidate
+            n++
+        }
     }
 }
 

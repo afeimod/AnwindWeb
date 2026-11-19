@@ -33,6 +33,22 @@ jobs:
       - name: Setup Gradle (cached)
         uses: gradle/actions/setup-gradle@v3
 
+      # v1.2.1：清理机器相关的本地配置（若被误提交会导致 CI 必挂）
+      # - local.properties：本机 SDK 路径，CI 用 runner 自带 ANDROID_HOME
+      # - org.gradle.java.home：本机 JDK 路径，CI 用 setup-java 装的 JDK
+      - name: Sanitize machine-specific configs
+        run: |
+          rm -f local.properties
+          sed -i '/^org\.gradle\.java\.home=/d' gradle.properties
+          echo "--- gradle.properties after sanitize ---"
+          cat gradle.properties
+
+      # v1.2.1：确保 SDK 34 平台与构建工具就位并接受许可（已装则为空操作）
+      - name: Ensure Android SDK 34 components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 

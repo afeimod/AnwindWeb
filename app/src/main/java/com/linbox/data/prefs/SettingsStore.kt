@@ -53,6 +53,9 @@ class SettingsStore(private val context: Context) {
         val DISPLAY_ORIENTATION = stringPreferencesKey("display_orientation")
         // 浏览器桌面/手机模式：desktop / mobile
         val BROWSER_UA_MODE = stringPreferencesKey("browser_ua_mode")
+        // v1.2.0（用户需求 5）：自定义主页背景 —— 空 = 默认；
+        // "image:/绝对路径" 静态图 / "video:/绝对路径" 循环静音视频
+        val HOMEPAGE_BG = stringPreferencesKey("homepage_bg")
 
         // === 浏览器 3D 视角（v2.16.2：鼠标视角模式，用于电脑网页游戏） ===
         // 开启后：在网页上按住拖动 = 按住鼠标移动视角（把拖动增量合成
@@ -223,13 +226,19 @@ class SettingsStore(private val context: Context) {
     val showSeconds: Flow<Boolean> = context.appPrefs.data.map { it[Keys.SHOW_SECONDS] ?: false }
     val iconSize: Flow<Float> = context.appPrefs.data.map { it[Keys.ICON_SIZE] ?: 48f }
     val defaultBrowserHome: Flow<String> = context.appPrefs.data
-        .map { it[Keys.DEFAULT_BROWSER_HOME] ?: "https://www.bing.com" }
+        // LinBrowser v1.1.0（用户需求 4）：主页默认回浏览器主页（linbox://home
+        // 首页宫格）而不是 bing.com —— onHome / 新标签 / 启动初站统一生效
+        .map { it[Keys.DEFAULT_BROWSER_HOME] ?: "linbox://home" }
     val uiScale: Flow<Float> = context.appPrefs.data.map { it[Keys.UI_SCALE] ?: 1.0f }
     val displayOrientation: Flow<String> = context.appPrefs.data
-        // v3.2.15（用户需求 4）：桌面默认横屏（此前默认 auto 跟随系统）
-        .map { it[Keys.DISPLAY_ORIENTATION] ?: "landscape" }
+        // LinBrowser v1.1.0（用户需求 2）：独立浏览器默认竖屏（正常手机浏览器
+        // 形态）；悬浮球菜单「屏幕方向」芯片可切竖屏/横屏/自动并持久化
+        .map { it[Keys.DISPLAY_ORIENTATION] ?: "portrait" }
     val browserUaMode: Flow<String> = context.appPrefs.data
         .map { it[Keys.BROWSER_UA_MODE] ?: "desktop" }
+    // v1.2.0（用户需求 5）：自定义主页背景（图/视频）；空串 = 默认纯色
+    val homepageBg: Flow<String> = context.appPrefs.data
+        .map { it[Keys.HOMEPAGE_BG] ?: "" }
 
     // === 浏览器 3D 视角（v2.16） ===
     val browser3dEnabled: Flow<Boolean> = context.appPrefs.data.map { it[Keys.BROWSER_3D_ENABLED] ?: false }
@@ -401,6 +410,11 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setBrowserUaMode(mode: String) {
         context.appPrefs.edit { it[Keys.BROWSER_UA_MODE] = mode }
+    }
+
+    // v1.2.0（用户需求 5）：自定义主页背景 —— "image:路径" / "video:路径" / 空串清除
+    suspend fun setHomepageBg(value: String) {
+        context.appPrefs.edit { it[Keys.HOMEPAGE_BG] = value }
     }
 
     // === 浏览器 3D 视角 setter（v2.16） ===

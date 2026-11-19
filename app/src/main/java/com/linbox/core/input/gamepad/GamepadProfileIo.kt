@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -186,10 +187,14 @@ private fun GamepadIoDialogPanel(
         onDismissRequest = { io.dismiss() },
         properties = DialogProperties(dismissOnClickOutside = false, usePlatformDefaultWidth = false)
     ) {
+        // v1.1.0（用户需求 3）：横屏矮屏自适应 —— 对话窗内容高度限制在
+        // 可用高度内，列表区自行滚动，确认按钮不再被屏幕底边截断
+        BoxWithConstraints {
         Box(
             modifier = Modifier
                 .padding(horizontal = 24.dp)
                 .width(320.dp)
+                .heightIn(max = maxHeight - 24.dp)
                 .shadow(10.dp, RoundedCornerShape(14.dp))
                 .clip(RoundedCornerShape(14.dp))
                 .background(Color(0xF2141A24))
@@ -199,6 +204,7 @@ private fun GamepadIoDialogPanel(
                 GamepadIoDialog.SAVE -> SaveNameDialog(io, scope, message)
                 GamepadIoDialog.LOAD -> LoadPickDialog(io, scope, message, onPersistConfig)
             }
+        }
         }
     }
 }
@@ -294,7 +300,8 @@ private fun LoadPickDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 320.dp)
+                // v1.1.0：旧版固定 320dp 在横屏下溢出屏幕；改为至多可用高 - 180dp
+                .heightIn(max = 260.dp)
                 .verticalScroll(rememberScrollState())
         ) {
             if (files.value.isEmpty()) {

@@ -51,8 +51,19 @@ import com.linbox.util.StorageAccess
  */
 class MainActivity : ComponentActivity() {
 
+    // v1.2.0（用户需求 5）：主页自定义背景选择器（图片/视频）。
+    // 活动级注册（onCreate 前段），主页「背景」按钮经 HomeBgManager 调用。
+    private val homeBgPicker = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { com.linbox.apps.browser.HomeBgManager.onPicked(this, it) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 选择器注入总线（主页按钮 → HomeBgManager.pick）
+        com.linbox.apps.browser.HomeBgManager.pickerLauncher = homeBgPicker
 
         // 全面屏沉浸式：内容绘制到状态栏/导航栏下方，并隐藏系统栏
         ImmersiveMode.applyTo(window)
@@ -121,7 +132,8 @@ class MainActivity : ComponentActivity() {
 
             // 全局 UI 缩放（乘到密度上，同时缩放所有 dp/sp）
             val uiScale by settingsStore.uiScale.collectAsState(initial = 1f)
-            val orientation by settingsStore.displayOrientation.collectAsState(initial = "auto")
+            // v1.1.0：默认竖屏（与 SettingsStore 缺省一致，避免首帧方向闪变）
+            val orientation by settingsStore.displayOrientation.collectAsState(initial = "portrait")
             val useCutout by settingsStore.useCutout.collectAsState(initial = true)
 
             // ===== 个性化：颜色 / 字体 =====

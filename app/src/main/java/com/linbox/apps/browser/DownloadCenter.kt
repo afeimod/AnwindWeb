@@ -85,11 +85,17 @@ object FileChooserBus {
             val activity = ctx as? Activity
                 ?: com.linbox.util.ImmersiveMode.findActivity(ctx)
             if (activity != null) {
-                intent.addFlags(0) // 同 Activity 内不需要 NEW_TASK
+                // 同 Activity 内启动不需要 NEW_TASK（加 NEW_TASK 会导致结果
+                // 立即以 RESULT_CANCELED 回收 —— v1.1.0 之前的断链形态之一）
                 activity.startActivityForResult(intent, REQUEST_CODE)
             } else {
+                // 拿不到 Activity 的兜底路径（理论上不会走到 —— WebView
+                // 以 Activity context 创建）：NEW_TASK 无结果回传，
+                // 页面按取消收尾，至少不悬挂回调
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 ctx.startActivity(intent)
+                pending = null
+                callback.onReceiveValue(null)
             }
             true
         } catch (_: Exception) {

@@ -605,6 +605,11 @@ private fun ActionPickerSheet(
     var activeGroup by remember { mutableStateOf(0) }
     val groups = GamepadController.ACTION_GROUPS
 
+    // v1.1.0（用户需求 3）：修复横屏显示不完整 —— 旧版固定 heightIn(max=460dp)
+    // 在手机横屏（可用高 ~360dp）下底部被截断；改为按可用高度自适应
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+    // 隐式接收者链里 maxHeight 无法隐式解析，必须在此层取值
+    val pickerMaxHeight = maxHeight
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -620,7 +625,7 @@ private fun ActionPickerSheet(
             modifier = Modifier
                 .padding(16.dp)
                 .fillMaxWidth()
-                .heightIn(max = 460.dp)
+                .heightIn(max = pickerMaxHeight - 40.dp)
                 .clip(RoundedCornerShape(16.dp))
                 // v6.8：自定义背景启用时半透玻璃（背景图透出，全局一致）
                 .background(
@@ -697,4 +702,5 @@ private fun ActionPickerSheet(
             }
         }
     }
+    } // end BoxWithConstraints（v1.1.0 横屏自适应）
 }

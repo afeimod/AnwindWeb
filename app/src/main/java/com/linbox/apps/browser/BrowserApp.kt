@@ -1,6 +1,7 @@
 package com.linbox.apps.browser
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,8 +22,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -357,19 +361,28 @@ internal fun BrowserContent(scope: WindowContentScope) {
                 if (activeTab != null) {
                     val url = activeTab.url
                     if (url == "linbox://home" || url.isEmpty()) {
-                        BrowserHomePage(
-                            onNavigate = { target ->
-                                val finalUrl = normalizeUrl(target)
-                                val tab = tabManager.getTab(tabManager.activeTabId)
-                                if (tab != null) {
-                                    // home → 真实 URL：tab.webView 为空时 factory 创建并延迟加载；
-                                    // 已有 WebView 时 update 块负责 loadUrl
-                                    tab.url = finalUrl
-                                    tab.title = finalUrl
-                                    tabManager.addressInput = finalUrl
-                                }
+                        // v1.2.0（用户需求 2）：主页按方向分流 ——
+                        // 竖屏 = 手机版主页（搜索框 + 宫格，v1.1.0 形态）；
+                        // 横屏 = 旧版 LinBox 桌面式主页（大 Logo + 横排快捷，
+                        // 用户：“横屏时还用之前的ui，竖屏用手机版ui”）
+                        val landscape = LocalConfiguration.current.orientation ==
+                            android.content.res.Configuration.ORIENTATION_LANDSCAPE
+                        val homeNavigate: (String) -> Unit = { target ->
+                            val finalUrl = normalizeUrl(target)
+                            val tab = tabManager.getTab(tabManager.activeTabId)
+                            if (tab != null) {
+                                // home → 真实 URL：tab.webView 为空时 factory 创建并延迟加载；
+                                // 已有 WebView 时 update 块负责 loadUrl
+                                tab.url = finalUrl
+                                tab.title = finalUrl
+                                tabManager.addressInput = finalUrl
                             }
-                        )
+                        }
+                        if (landscape) {
+                            BrowserHomeLandscape(onNavigate = homeNavigate)
+                        } else {
+                            BrowserHomePage(onNavigate = homeNavigate)
+                        }
                     } else {
                         // key(activeTab.id)：每个标签独立的组合位置 → 各自的 AndroidView。
                         // WebView 本身常驻缓存（切换标签不销毁），切回时原样恢复。
@@ -633,130 +646,420 @@ private fun WebViewContainer(
 }
 
 /**
- * 浏览器首页：快捷导航 + 搜索框 + 历史/书签入口
+ * 浏览器首页（v1.1.0 重做 —— 正常手机浏览器主页形态，用户需求 1）：
+ * - 顶部 Logo 圆徽 + 应用名
+ * - 大号圆角搜索栏（输入关键词 = Bing 搜索 / 输入网址直达）
+ * - 4 列站点快捷宫格（12 站，彩色圆角图标瓦片 —— Chrome / 夸克式）
+ * - 整页可滚动（横屏矮屏下也完整可操作）
+ * - v1.2.0（用户需求 5）：自定义背景（图/视频）+ 顶部半透明蒙层保可读
  */
 @Composable
 private fun BrowserHomePage(onNavigate: (String) -> Unit) {
     val theme = LocalWinTheme.current
     var searchText by remember { mutableStateOf("") }
+    val scrollState = rememberScrollState()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(theme.windowBackgroundColor)
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Spacer(Modifier.height(40.dp))
+    // v1.2.0（用户需求 5）：自定义主页背景（"image:/路径" / "video:/路径"）
+    val app = LinBoxApp.get()
+    val bgSpec by app.settingsStore.homepageBg.collectAsState(initial = "")
+    val onBg = bgSpec.isNotEmpty()
 
-        // Logo
+    // 背景模式下文字统一白字（叠深色蒙层，图/视频上均可读）
+    val fg = if (theme.isDark || onBg) Color.White else Color.Black
+    val fgSecondary = if (onBg) Color.White.copy(alpha = 0.72f) else theme.secondaryTextColor
+    val searchBarBg = if (onBg) Color(0x96000000) else theme.buttonBackgroundColor
+
+    fun submitSearch() {
+        val q = searchText.trim()
+        // 交给 onNavigate → normalizeUrl 判断：含 . 视为网址，否则 Bing 搜索
+        if (q.isNotEmpty()) onNavigate(q)
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(theme.windowBackgroundColor)) {
+        // ===== 背景层（图 / 视频，铺满裁剪） =====
+        if (onBg) HomePageBgLayer(bgSpec)
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                // 背景激活时叠深色蒙层保文字可读；否则主题底色
+                .background(if (onBg) Color(0x4D000000) else theme.windowBackgroundColor)
+                .verticalScroll(scrollState)
+                .padding(horizontal = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+        Spacer(Modifier.height(44.dp))
+
+        // ===== Logo 圆徽 =====
+        Box(
+            modifier = Modifier
+                .size(58.dp)
+                .background(theme.accentColor.copy(alpha = 0.18f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("🌐", fontSize = 30.sp)
+        }
+        Spacer(Modifier.height(10.dp))
         Text(
-            text = "🌐 LinBox Browser",
-            color = if (theme.isDark) Color.White else Color.Black,
-            fontSize = 28.sp,
+            text = "LinBrowser",
+            color = fg,
+            fontSize = 19.sp,
             fontWeight = FontWeight.Bold
         )
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(26.dp))
 
-        // 搜索框
+        // ===== 大号圆角搜索栏 =====
         Row(
             modifier = Modifier
-                .fillMaxWidth(0.7f)
-                .height(44.dp)
-                .background(theme.buttonBackgroundColor, RoundedCornerShape(22.dp))
-                .padding(horizontal = 16.dp),
+                .fillMaxWidth()
+                .height(46.dp)
+                .background(searchBarBg, RoundedCornerShape(23.dp))
+                .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            Icon(
+                Icons.Default.Search,
+                contentDescription = "搜索",
+                tint = if (onBg) Color.White.copy(alpha = 0.65f) else theme.buttonTextColor.copy(alpha = 0.55f),
+                modifier = Modifier.size(19.dp)
+            )
+            Spacer(Modifier.width(10.dp))
             BasicTextField(
                 value = searchText,
                 onValueChange = { searchText = it },
                 singleLine = true,
-                textStyle = TextStyle(
-                    color = if (theme.isDark) Color.White else Color.Black,
-                    fontSize = 14.sp
-                ),
+                textStyle = TextStyle(color = fg, fontSize = 14.sp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = {
-                    val q = searchText.trim()
-                    if (q.isNotEmpty()) {
-                        // 直接把用户输入交给 onNavigate，由 normalizeUrl 判断：
-                        // - 含 . 的视为网址 (例如 baidu.com → https://baidu.com)
-                        // - 否则视为搜索关键词 (例如 你好 → Bing 搜索)
-                        onNavigate(q)
-                    }
-                }),
+                keyboardActions = KeyboardActions(onSearch = { submitSearch() }),
                 modifier = Modifier
                     .weight(1f)
                     .keyboardAware(
                         value = { searchText },
                         onValue = { searchText = it },
                         singleLine = true,
-                        onEnter = {
-                            val q = searchText.trim()
-                            if (q.isNotEmpty()) onNavigate(q)
-                        }
+                        onEnter = { submitSearch() }
                     )
             )
-            IconButton(onClick = {
-                val q = searchText.trim()
-                if (q.isNotEmpty()) {
-                    // 与 IME 搜索回调保持一致：交给 onNavigate + normalizeUrl 判断
-                    onNavigate(q)
-                }
-            }) {
-                Icon(Icons.Default.Search, contentDescription = "搜索")
+            // 搜索引擎标签（点击同样触发搜索）
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(theme.accentColor.copy(alpha = 0.16f))
+                    .clickable { submitSearch() }
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    "必应",
+                    color = theme.accentColor,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium
+                )
             }
         }
-
-        Spacer(Modifier.height(32.dp))
-
-        // 快捷导航
-        val quickLinks = listOf(
-            QuickLink("必应", "https://www.bing.com", "🔍"),
-            QuickLink("百度", "https://www.baidu.com", "🅑"),
-            QuickLink("B站", "https://www.bilibili.com", "📺"),
-            QuickLink("GitHub", "https://github.com", "🐙"),
-            QuickLink("知乎", "https://www.zhihu.com", "💡"),
-            QuickLink("微博", "https://weibo.com", "🐦"),
-            QuickLink("YouTube", "https://www.youtube.com", "▶️"),
-            QuickLink("Wikipedia", "https://www.wikipedia.org", "📚")
+        Text(
+            "输入关键词搜索 · 输入网址直达",
+            color = fgSecondary,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 8.dp)
         )
 
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        Spacer(Modifier.height(26.dp))
+
+        // ===== 4 列快捷宫格（12 站，彩色瓦片） =====
+        val quickLinks = listOf(
+            QuickLink("必应", "https://www.bing.com", "🔍", Color(0xFF1498B4)),
+            QuickLink("百度", "https://www.baidu.com", "🐾", Color(0xFF3B6EE8)),
+            QuickLink("B站", "https://www.bilibili.com", "📺", Color(0xFFFB7299)),
+            QuickLink("GitHub", "https://github.com", "🐙", Color(0xFF5B6B7C)),
+            QuickLink("知乎", "https://www.zhihu.com", "📘", Color(0xFF2E7CD6)),
+            QuickLink("微博", "https://weibo.com", "🐦", Color(0xFFE8762C)),
+            QuickLink("淘宝", "https://www.taobao.com", "🛍️", Color(0xFFFF7A2E)),
+            QuickLink("京东", "https://www.jd.com", "🐶", Color(0xFFD8332F)),
+            QuickLink("抖音", "https://www.douyin.com", "🎵", Color(0xFF231F20)),
+            QuickLink("豆瓣", "https://www.douban.com", "📚", Color(0xFF3BA272)),
+            QuickLink("Wikipedia", "https://www.wikipedia.org", "🌍", Color(0xFF6B7B8C)),
+            QuickLink("YouTube", "https://www.youtube.com", "▶️", Color(0xFFFF4433))
+        )
+        quickLinks.chunked(4).forEach { rowLinks ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                rowLinks.forEach { link ->
+                    QuickLinkItem(
+                        link = link,
+                        dark = theme.isDark || onBg,
+                        onClick = { onNavigate(link.url) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                // 不足 4 个时补位占齐
+                repeat(4 - rowLinks.size) { Spacer(Modifier.weight(1f)) }
+            }
+            Spacer(Modifier.height(18.dp))
+        }
+        Spacer(Modifier.height(12.dp))
+        } // end Column（内容）
+
+        // ===== v1.2.0（用户需求 5）：背景管理按钮（右上角，浮在内容之上） =====
+        HomePageBgButtons(bgActive = onBg)
+    } // end Box（主页根）
+}
+
+/**
+ * v1.2.0（用户需求 2）：横屏主页 —— 恢复旧版 LinBox 桌面式形态
+ *（用户：“横屏时还用之前的ui，竖屏用手机版ui”）。
+ * v1.0 原版布局：大 Logo + 70% 宽搜索栏 + 单行横向快捷导航；
+ * 横屏矮屏纵向紧凑，历史习惯零学习成本。同享自定义背景（需求 5）。
+ */
+@Composable
+private fun BrowserHomeLandscape(onNavigate: (String) -> Unit) {
+    val theme = LocalWinTheme.current
+    var searchText by remember { mutableStateOf("") }
+
+    val app = LinBoxApp.get()
+    val bgSpec by app.settingsStore.homepageBg.collectAsState(initial = "")
+    val onBg = bgSpec.isNotEmpty()
+    val fg = if (theme.isDark || onBg) Color.White else Color.Black
+    val searchBarBg = if (onBg) Color(0x96000000) else theme.buttonBackgroundColor
+
+    fun submitSearch() {
+        val q = searchText.trim()
+        if (q.isNotEmpty()) onNavigate(q)
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(theme.windowBackgroundColor)) {
+        if (onBg) HomePageBgLayer(bgSpec)
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(if (onBg) Color(0x4D000000) else theme.windowBackgroundColor)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            items(quickLinks) { link ->
-                QuickLinkItem(link = link, onClick = { onNavigate(link.url) })
+            Spacer(Modifier.height(16.dp))
+
+            // ===== 大 Logo（旧版形态） =====
+            Text(
+                text = "🌐 LinBrowser",
+                color = fg,
+                fontSize = 26.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(Modifier.height(14.dp))
+
+            // ===== 搜索栏（70% 宽，旧版形态） =====
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth(0.7f)
+                    .height(42.dp)
+                    .background(searchBarBg, RoundedCornerShape(21.dp))
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                BasicTextField(
+                    value = searchText,
+                    onValueChange = { searchText = it },
+                    singleLine = true,
+                    textStyle = TextStyle(color = fg, fontSize = 14.sp),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { submitSearch() }),
+                    modifier = Modifier
+                        .weight(1f)
+                        .keyboardAware(
+                            value = { searchText },
+                            onValue = { searchText = it },
+                            singleLine = true,
+                            onEnter = { submitSearch() }
+                        )
+                )
+                IconButton(onClick = { submitSearch() }) {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = "搜索",
+                        tint = if (onBg) Color.White else fg
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(18.dp))
+
+            // ===== 横向快捷导航（旧版形态：单行 LazyRow） =====
+            val quickLinks = listOf(
+                QuickLink("必应", "https://www.bing.com", "🔍", Color(0xFF1498B4)),
+                QuickLink("百度", "https://www.baidu.com", "🐾", Color(0xFF3B6EE8)),
+                QuickLink("B站", "https://www.bilibili.com", "📺", Color(0xFFFB7299)),
+                QuickLink("GitHub", "https://github.com", "🐙", Color(0xFF5B6B7C)),
+                QuickLink("知乎", "https://www.zhihu.com", "📘", Color(0xFF2E7CD6)),
+                QuickLink("微博", "https://weibo.com", "🐦", Color(0xFFE8762C)),
+                QuickLink("淘宝", "https://www.taobao.com", "🛍️", Color(0xFFFF7A2E)),
+                QuickLink("京东", "https://www.jd.com", "🐶", Color(0xFFD8332F)),
+                QuickLink("抖音", "https://www.douyin.com", "🎵", Color(0xFF231F20)),
+                QuickLink("豆瓣", "https://www.douban.com", "📚", Color(0xFF3BA272)),
+                QuickLink("Wikipedia", "https://www.wikipedia.org", "🌍", Color(0xFF6B7B8C)),
+                QuickLink("YouTube", "https://www.youtube.com", "▶️", Color(0xFFFF4433))
+            )
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(quickLinks) { link ->
+                    QuickLinkItem(
+                        link = link,
+                        dark = theme.isDark || onBg,
+                        onClick = { onNavigate(link.url) },
+                        modifier = Modifier.width(76.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        } // end Column
+
+        HomePageBgButtons(bgActive = onBg)
+    } // end Box
+}
+
+private data class QuickLink(
+    val name: String,
+    val url: String,
+    val emoji: String,
+    val tint: Color
+)
+
+/**
+ * v1.2.0（用户需求 5）：主页背景层 —— "image:/路径" 静态图 /
+ * "video:/路径" 循环静音视频，铺满裁剪（ContentScale.Crop /
+ * SCALE_TO_FIT_WITH_CROPPING）。不拦截触摸：仅绘制层，点击穿透到
+ * 内容 Column（背景层不挂任何 pointerInput）。
+ */
+@Composable
+private fun HomePageBgLayer(spec: String) {
+    when {
+        spec.startsWith("image:") -> {
+            val path = spec.removePrefix("image:")
+            val bmp = remember(path) { decodeSampledBitmap(path) }
+            if (bmp != null) {
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        spec.startsWith("video:") -> {
+            val path = spec.removePrefix("video:")
+            AndroidView(
+                factory = { ctx -> VideoBgView(ctx).apply { setSource(path) } },
+                update = { it.setSource(path) },
+                onRelease = { it.releasePlayer() },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+}
+
+/** 采样解码背景图（目标长边 ≤ 1600px，大图不撑爆内存）。 */
+private fun decodeSampledBitmap(path: String): android.graphics.Bitmap? = runCatching {
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    android.graphics.BitmapFactory.decodeFile(path, bounds)
+    val target = 1600
+    var sample = 1
+    while ((bounds.outWidth / (sample * 2) >= target) || (bounds.outHeight / (sample * 2) >= target)) {
+        sample *= 2
+    }
+    android.graphics.BitmapFactory.decodeFile(
+        path,
+        android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+    )
+}.getOrNull()
+
+/**
+ * v1.2.0（用户需求 5）：主页右上角背景管理按钮 ——
+ * 「背景」：打开系统选择器（图片/视频任选）；自定义背景生效后
+ * 追加「恢复」按钮清除回到默认。半透明玻璃芯片样式，叠背景也可读。
+ */
+@Composable
+private fun HomePageBgButtons(bgActive: Boolean) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.End
+    ) {
+        // 选择/更换背景
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0x66000000))
+                .clickable { HomeBgManager.pick() }
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Wallpaper,
+                contentDescription = "自定义主页背景",
+                tint = Color.White,
+                modifier = Modifier.size(15.dp)
+            )
+            Spacer(Modifier.width(4.dp))
+            Text("背景", color = Color.White, fontSize = 11.sp)
+        }
+        if (bgActive) {
+            Spacer(Modifier.width(6.dp))
+            // 恢复默认（清除自定义背景）
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0x66000000))
+                    .clickable { HomeBgManager.clear() }
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.RestartAlt,
+                    contentDescription = "恢复默认背景",
+                    tint = Color.White,
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(Modifier.width(4.dp))
+                Text("默认", color = Color.White, fontSize = 11.sp)
             }
         }
     }
 }
 
-private data class QuickLink(val name: String, val url: String, val emoji: String)
-
 @Composable
-private fun QuickLinkItem(link: QuickLink, onClick: () -> Unit) {
+private fun QuickLinkItem(
+    link: QuickLink,
+    dark: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     val theme = LocalWinTheme.current
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
+        modifier = modifier
             .clickable(onClick = onClick)
-            .padding(8.dp)
-            .width(72.dp)
+            .padding(vertical = 4.dp)
     ) {
+        // 彩色圆角瓦片：浅色模式原色淡底 / 深色模式 26% 透明度衬底
         Box(
             modifier = Modifier
-                .size(48.dp)
-                .background(theme.accentColor.copy(alpha = 0.15f), RoundedCornerShape(12.dp)),
+                .size(52.dp)
+                .background(
+                    if (dark) link.tint.copy(alpha = 0.26f) else link.tint.copy(alpha = 0.16f),
+                    RoundedCornerShape(16.dp)
+                ),
             contentAlignment = Alignment.Center
         ) {
             Text(link.emoji, fontSize = 24.sp)
         }
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(6.dp))
         Text(
             text = link.name,
-            color = if (theme.isDark) Color.White else Color.Black,
+            color = if (dark) Color.White else Color.Black,
             fontSize = 11.sp,
             maxLines = 1
         )

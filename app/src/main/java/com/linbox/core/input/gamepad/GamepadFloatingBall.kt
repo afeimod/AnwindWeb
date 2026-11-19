@@ -18,8 +18,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -128,6 +130,8 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
 
     // v5.0：手柄总开关（球菜单“开启手柄”需感知当前态）
     val gamepadEnabled by app.settingsStore.gamepadEnabled.collectAsState(initial = false)
+    // v1.1.0（用户需求 2）：屏幕方向设置（竖屏/横屏/自动循环切换）
+    val displayOrientation by app.settingsStore.displayOrientation.collectAsState(initial = "portrait")
     // LinBrowser 独立版：应用即浏览器 —— 浏览器组随内容组合常驻
     //（BrowserQuickBus.available 由浏览器内容组合时注册）。
     // LinBox 的 X11 组 / 终端组已随容器栈移除。
@@ -146,9 +150,8 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
 
     // v6.2（用户：“悬浮球以及调出的菜单也太大了，全都降低50%”）：
     // 球体 54→28dp；菜单宽 232→190dp + 全部改紧凑多排网格芯片
+    //（v1.2.0：宽度随横屏双箱盒布局自适应，移入 BoxWithConstraints 计算）
     val ballSize = 28.dp
-    val menuWidth = 190.dp
-
     // 按压反馈
     val pressScale by animateFloatAsState(
         targetValue = if (pressed) 0.86f else 1f,
@@ -171,6 +174,12 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
         val density = LocalDensity.current
         val freeWpx = with(density) { (maxWidth - ballSize).toPx() }
         val freeHpx = with(density) { (maxHeight - ballSize).toPx() }
+        // v1.2.0（用户需求 3，用户：“悬浮球调用的菜单排版在横屏显示
+        // 不完整，说了很多次了，可以用多个嵌入箱盒”）：横屏矮屏 +
+        // 浏览器组在场时菜单拆【双箱盒并排】（主功能左 / 浏览器快捷右），
+        // 宽度加倍、高度减半 —— 全部内容一屏可见；竖屏保持 190dp 单列
+        val splitPanels = maxHeight < 460.dp && inBrowser
+        val menuWidth = if (splitPanels) 332.dp else 190.dp
         val menuWpx = with(density) { menuWidth.toPx() }
         val ballPx = with(density) { ballSize.toPx() }
 
@@ -209,9 +218,14 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
         }
 
         // 浏览器组计入估算（独立版唯一附加组）
+        // v1.1.0（用户需求 3）：横屏紧凑模式 —— 可用高度 < 460dp（手机横屏
+        // ~360-410dp）时芯片整体收紧一档，全部菜单内容不出屏、不滚动全可见
+        val menuCompact = maxHeight < 460.dp
         val menuHpx = menuHeightEstimate(
             density,
-            if (inBrowser) 1 else 0
+            if (inBrowser) 1 else 0,
+            menuCompact,
+            splitPanels
         )
         val menuPad = with(density) { 10.dp.toPx() }
         val screenWpxTotal = with(density) { maxWidth.toPx() }
@@ -291,184 +305,243 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
                     animationSpec = tween(110, easing = FastOutSlowInEasing)
                 )
             ) {
-                Column(
-                    modifier = Modifier
-                        .heightIn(max = menuMaxHeightDp)
-                        .shadow(6.dp, RoundedCornerShape(16.dp))
-                        .clip(RoundedCornerShape(16.dp))
-                        // v6.8：自定义背景启用时菜单半透玻璃（背景图透出，
-                        // 与全局所有菜单一致）；无背景时保持原深色底
-                        .background(
-                            if (com.linbox.core.theme.ShellThemeState.customBgPath.isNotBlank())
-                                Color(0xCC162434)
-                            else Color(0xF2162434)
-                        )
-                        .verticalScroll(rememberScrollState())
-                        .padding(vertical = 4.dp)
-                        // 菜单登记：X11 触摸剥离 + 触控板直通（见类 KDoc）
-                        .onGloballyPositioned {
-                            val b = it.boundsInWindowCompat()
-                            GamepadController.registerMenuHit(b.left, b.top, b.right, b.bottom)
-                            TrackpadRouter.registerPassthrough("gpBall", b)
-                        }
-                ) {
-                // ---- 标题头：名称 + 组件数（v6.2 紧凑化） ----
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "虚拟手柄",
-                        color = Color(0xFFEAF6FF),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        "${GamepadController.elements.size} 组件",
-                        color = Color(0x99B8C7D9),
-                        fontSize = 9.5.sp
-                    )
-                }
-                BallMenuSectionDivider()
+                // =====================================================
+                // v1.2.0（用户需求 3，用户："悬浮球调用的菜单排版在横屏
+                // 显示不完整啊，说了很多次了，可以用多个嵌入箱盒"）：
+                // 横屏矮屏（可用高 < 460dp）+ 浏览器组在场 → 菜单拆
+                // 【双箱盒并排】：主功能左箱盒、浏览器快捷右箱盒 ——
+                // 宽度加倍、高度减半，全部内容一屏可见不依赖滚动；
+                // 竖屏 / 非浏览器保持原单列堆叠形态。
+                // =====================================================
 
-                // ---- v6.2：主功能组改紧凑三列网格芯片（用户："虚拟手柄
-                //      的菜单也和 x11 那样"——与 X11 快捷组同款多排集合） ----
-                BallChipGrid(
-                    listOf(
-                        BallChipItem(BallIconKind.GAMEPAD, when {
-                            !gamepadEnabled -> "开启手柄"
-                            GamepadController.visible -> "收起手柄"
-                            else -> "显示手柄"
-                        }) {
-                            if (!gamepadEnabled) {
-                                // v6.0：visible 与总开关同步落盘 —— 全局加载只发生一次，
-                                // 此处不持久化的话下次启动仍是旧 padVisible
-                                GamepadController.visible = true
-                                persistConfig()
-                                scope.launch { app.settingsStore.setGamepadEnabled(true) }
-                            } else {
-                                GamepadController.releaseAllKeys()
-                                GamepadController.visible = !GamepadController.visible
-                                persistConfig()
-                            }
-                            expanded = false
-                        },
-                        BallChipItem(BallIconKind.SETTINGS, "手柄设置") {
+                // ---- 芯片清单提前抽取（双箱盒 / 单列两形态共用） ----
+                val mainMenuItems = listOf(
+                    BallChipItem(BallIconKind.GAMEPAD, when {
+                        !gamepadEnabled -> "开启手柄"
+                        GamepadController.visible -> "收起手柄"
+                        else -> "显示手柄"
+                    }) {
+                        if (!gamepadEnabled) {
+                            // v6.0：visible 与总开关同步落盘 —— 全局加载只发生一次，
+                            // 此处不持久化的话下次启动仍是旧 padVisible
+                            GamepadController.visible = true
+                            persistConfig()
+                            scope.launch { app.settingsStore.setGamepadEnabled(true) }
+                        } else {
                             GamepadController.releaseAllKeys()
-                            GamepadController.settingsOpen = true
-                            expanded = false
-                        },
-                        BallChipItem(BallIconKind.EDIT, "编辑布局") {
-                            GamepadController.releaseAllKeys()
-                            GamepadController.editMode = !GamepadController.editMode
-                            if (!GamepadController.editMode) GamepadController.selectElement(null)
-                            expanded = false
-                        },
-                        // v3.4.6：配置文件（主菜单位置 —— 先读取，再编辑）
-                        BallChipItem(BallIconKind.SAVE, "保存配置") {
-                            GamepadController.releaseAllKeys()
-                            profileIo.saveProfile()
-                            expanded = false
-                        },
-                        BallChipItem(BallIconKind.FOLDER, "读取配置") {
-                            GamepadController.releaseAllKeys()
-                            profileIo.loadProfile()
-                            expanded = false
-                        },
-                        BallChipItem(BallIconKind.CLOSE, "关闭手柄", danger = true) {
-                            GamepadController.releaseAllKeys()
-                            GamepadController.editMode = false
-                            expanded = false
-                            scope.launch { app.settingsStore.setGamepadEnabled(false) }
+                            GamepadController.visible = !GamepadController.visible
+                            persistConfig()
                         }
-                    )
+                        expanded = false
+                    },
+                    BallChipItem(BallIconKind.SETTINGS, "手柄设置") {
+                        GamepadController.releaseAllKeys()
+                        GamepadController.settingsOpen = true
+                        expanded = false
+                    },
+                    BallChipItem(BallIconKind.EDIT, "编辑布局") {
+                        GamepadController.releaseAllKeys()
+                        GamepadController.editMode = !GamepadController.editMode
+                        if (!GamepadController.editMode) GamepadController.selectElement(null)
+                        expanded = false
+                    },
+                    // v3.4.6：配置文件（主菜单位置 —— 先读取，再编辑）
+                    BallChipItem(BallIconKind.SAVE, "保存配置") {
+                        GamepadController.releaseAllKeys()
+                        profileIo.saveProfile()
+                        expanded = false
+                    },
+                    BallChipItem(BallIconKind.FOLDER, "读取配置") {
+                        GamepadController.releaseAllKeys()
+                        profileIo.loadProfile()
+                        expanded = false
+                    },
+                    BallChipItem(BallIconKind.CLOSE, "关闭手柄", danger = true) {
+                        GamepadController.releaseAllKeys()
+                        GamepadController.editMode = false
+                        expanded = false
+                        scope.launch { app.settingsStore.setGamepadEnabled(false) }
+                    }
                 )
 
-                // =====================================================
-                // v6.9：浏览器快捷组（用户：“浏览器里的快捷设置也移动到
-                // 悬浮球里，识别浏览器后就显示，浏览器上的按钮去掉只保留
-                // 收藏按钮”）—— 原工具条按钮全部并入本组，经 BrowserQuickBus
-                // 投递；浏览器工具条只留地址栏 + 收藏按钮。
-                // =====================================================
-                if (inBrowser) {
-                    BallMenuSectionDivider()
-                    Text(
-                        "浏览器快捷",
-                        color = Color(0x80B8C7D9),
-                        fontSize = 9.sp,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
-                    )
-                    BallChipGrid(
-                        listOf(
-                            BallChipItem(BallIconKind.BACK, "后退",
-                                enabled = com.linbox.apps.browser.BrowserQuickBus.goBack != null) {
-                                com.linbox.apps.browser.BrowserQuickBus.goBack?.invoke()
-                                expanded = false
+                val browserMenuItems = if (inBrowser) listOf(
+                        BallChipItem(BallIconKind.BACK, "后退",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.goBack != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.goBack?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.FORWARD, "前进",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.goForward != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.goForward?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.REFRESH, "刷新",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.refresh != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.refresh?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.HOME, "主页",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.goHome != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.goHome?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.BOOKMARK, "收藏",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.bookmarkCurrent != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.bookmarkCurrent?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.FOLDER, "书签",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.showBookmarks != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.showBookmarks?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.HISTORY, "历史",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.showHistory != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.showHistory?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(
+                            BallIconKind.UA,
+                            if (com.linbox.apps.browser.BrowserQuickBus.uaIsDesktop) "手机模式" else "桌面模式",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.toggleUaMode != null
+                        ) {
+                            com.linbox.apps.browser.BrowserQuickBus.toggleUaMode?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(
+                            BallIconKind.FULLSCREEN,
+                            if (com.linbox.apps.browser.BrowserQuickBus.fullscreenActive) "退出全屏" else "全屏",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.toggleFullscreen != null
+                        ) {
+                            com.linbox.apps.browser.BrowserQuickBus.toggleFullscreen?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.DISPLAY, "3D 视角",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.toggleView3d != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.toggleView3d?.invoke()
+                            expanded = false
+                        },
+                        // v1.1.0（用户需求 2）：屏幕方向 —— 竖屏/横屏/自动循环
+                        // 切换并持久化；标签实时显示当前方向，点一下切到下一档
+                        BallChipItem(
+                            BallIconKind.DISPLAY,
+                            when (displayOrientation) {
+                                "landscape" -> "横屏"
+                                "auto" -> "自动"
+                                else -> "竖屏"
                             },
-                            BallChipItem(BallIconKind.FORWARD, "前进",
-                                enabled = com.linbox.apps.browser.BrowserQuickBus.goForward != null) {
-                                com.linbox.apps.browser.BrowserQuickBus.goForward?.invoke()
-                                expanded = false
-                            },
-                            BallChipItem(BallIconKind.REFRESH, "刷新",
-                                enabled = com.linbox.apps.browser.BrowserQuickBus.refresh != null) {
-                                com.linbox.apps.browser.BrowserQuickBus.refresh?.invoke()
-                                expanded = false
-                            },
-                            BallChipItem(BallIconKind.HOME, "主页",
-                                enabled = com.linbox.apps.browser.BrowserQuickBus.goHome != null) {
-                                com.linbox.apps.browser.BrowserQuickBus.goHome?.invoke()
-                                expanded = false
-                            },
-                            BallChipItem(BallIconKind.BOOKMARK, "收藏",
-                                enabled = com.linbox.apps.browser.BrowserQuickBus.bookmarkCurrent != null) {
-                                com.linbox.apps.browser.BrowserQuickBus.bookmarkCurrent?.invoke()
-                                expanded = false
-                            },
-                            BallChipItem(BallIconKind.FOLDER, "书签",
-                                enabled = com.linbox.apps.browser.BrowserQuickBus.showBookmarks != null) {
-                                com.linbox.apps.browser.BrowserQuickBus.showBookmarks?.invoke()
-                                expanded = false
-                            },
-                            BallChipItem(BallIconKind.HISTORY, "历史",
-                                enabled = com.linbox.apps.browser.BrowserQuickBus.showHistory != null) {
-                                com.linbox.apps.browser.BrowserQuickBus.showHistory?.invoke()
-                                expanded = false
-                            },
-                            BallChipItem(
-                                BallIconKind.UA,
-                                if (com.linbox.apps.browser.BrowserQuickBus.uaIsDesktop) "手机模式" else "桌面模式",
-                                enabled = com.linbox.apps.browser.BrowserQuickBus.toggleUaMode != null
-                            ) {
-                                com.linbox.apps.browser.BrowserQuickBus.toggleUaMode?.invoke()
-                                expanded = false
-                            },
-                            BallChipItem(
-                                BallIconKind.FULLSCREEN,
-                                if (com.linbox.apps.browser.BrowserQuickBus.fullscreenActive) "退出全屏" else "全屏",
-                                enabled = com.linbox.apps.browser.BrowserQuickBus.toggleFullscreen != null
-                            ) {
-                                com.linbox.apps.browser.BrowserQuickBus.toggleFullscreen?.invoke()
-                                expanded = false
-                            },
-                            BallChipItem(BallIconKind.DISPLAY, "3D 视角",
-                                enabled = com.linbox.apps.browser.BrowserQuickBus.toggleView3d != null) {
-                                com.linbox.apps.browser.BrowserQuickBus.toggleView3d?.invoke()
-                                expanded = false
-                            },
-                            // 关闭浏览器：收起应用回桌面（标签会话跨进出
-                            // 存活，再进不丢；与系统返回键同链路）。
-                            BallChipItem(BallIconKind.CLOSE, "关闭浏览器", danger = true) {
-                                com.linbox.apps.browser.BrowserQuickBus.exitBrowser?.invoke()
-                                expanded = false
+                            active = displayOrientation == "landscape" || displayOrientation == "portrait"
+                        ) {
+                            val next = when (displayOrientation) {
+                                "portrait" -> "landscape"
+                                "landscape" -> "auto"
+                                else -> "portrait"
                             }
-                        )
-                    )
-                }
+                            scope.launch { app.settingsStore.setDisplayOrientation(next) }
+                            expanded = false
+                        },
+                        // 关闭浏览器：收起应用回桌面（标签会话跨进出
+                        // 存活，再进不丢；与系统返回键同链路）。
+                        BallChipItem(BallIconKind.CLOSE, "关闭浏览器", danger = true) {
+                            com.linbox.apps.browser.BrowserQuickBus.exitBrowser?.invoke()
+                            expanded = false
+                        }
+                ) else emptyList()
 
+                // ---- 菜单面板外观（阴影 / 玻璃底 / 命中登记），两形态共用 ----
+                fun Modifier.menuPanelStyle(): Modifier = this
+                    .shadow(6.dp, RoundedCornerShape(16.dp))
+                    .clip(RoundedCornerShape(16.dp))
+                    // v6.8：自定义背景启用时菜单半透玻璃（背景图透出，
+                    // 与全局所有菜单一致）；无背景时保持原深色底
+                    .background(
+                        if (com.linbox.core.theme.ShellThemeState.customBgPath.isNotBlank())
+                            Color(0xCC162434)
+                        else Color(0xF2162434)
+                    )
+                    // 菜单登记：X11 触摸剥离 + 触控板直通（见类 KDoc）
+                    .onGloballyPositioned {
+                        val b = it.boundsInWindowCompat()
+                        GamepadController.registerMenuHit(b.left, b.top, b.right, b.bottom)
+                        TrackpadRouter.registerPassthrough("gpBall", b)
+                    }
+
+                if (splitPanels) {
+                    // ===== 双箱盒（横屏）：左箱盒主功能 / 右箱盒浏览器快捷 =====
+                    Row(
+                        modifier = Modifier
+                            .height(IntrinsicSize.Min)
+                            .heightIn(max = menuMaxHeightDp)
+                            .menuPanelStyle()
+                            .padding(vertical = 4.dp, horizontal = 2.dp)
+                    ) {
+                        // 左箱盒：标题头 + 主功能组
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            BallMenuHeader()
+                            BallMenuSectionDivider()
+                            BallChipGrid(compact = true, items = mainMenuItems)
+                        }
+                        Spacer(Modifier.width(7.dp))
+                        // 竖分隔线（两箱盒分界）
+                        Box(
+                            Modifier
+                                .width(1.dp)
+                                .fillMaxHeight()
+                                .padding(vertical = 10.dp)
+                                .background(Color(0x14FFFFFF))
+                        )
+                        Spacer(Modifier.width(7.dp))
+                        // 右箱盒：浏览器快捷组
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "浏览器快捷",
+                                    color = Color(0x99B8C7D9),
+                                    fontSize = 9.5.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            BallChipGrid(compact = true, items = browserMenuItems)
+                        }
+                    }
+                } else {
+                    // ===== 单列（竖屏 / 非浏览器）：原堆叠形态 =====
+                    Column(
+                        modifier = Modifier
+                            .heightIn(max = menuMaxHeightDp)
+                            .menuPanelStyle()
+                            .verticalScroll(rememberScrollState())
+                            .padding(vertical = 4.dp)
+                    ) {
+                        BallMenuHeader()
+                        BallMenuSectionDivider()
+                        BallChipGrid(compact = menuCompact, items = mainMenuItems)
+                        if (inBrowser) {
+                            BallMenuSectionDivider()
+                            Text(
+                                "浏览器快捷",
+                                color = Color(0x80B8C7D9),
+                                fontSize = 9.sp,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                            )
+                            BallChipGrid(compact = menuCompact, items = browserMenuItems)
+                        }
+                    }
                 }
             }
         }
@@ -579,6 +652,32 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
     }
 }
 
+/**
+ * 菜单标题头（v6.2 紧凑化；v1.2.0 抽取复用 —— 单列 / 双箱盒两形态共用）。
+ */
+@Composable
+private fun BallMenuHeader() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "虚拟手柄",
+            color = Color(0xFFEAF6FF),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            "${GamepadController.elements.size} 组件",
+            color = Color(0x99B8C7D9),
+            fontSize = 9.5.sp
+        )
+    }
+}
+
 /** 菜单分组之间的细分隔线（v3.4.6）。 */
 @Composable
 private fun BallMenuSectionDivider() {
@@ -608,14 +707,17 @@ private class BallChipItem(
  * 主功能组 / 终端快捷组 / X11 快捷组共用同一网格形态。
  */
 @Composable
-private fun BallChipGrid(items: List<BallChipItem>) {
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+private fun BallChipGrid(
+    items: List<BallChipItem>,
+    compact: Boolean = false
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 5.dp)) {
         items.chunked(3).forEach { rowItems ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 5.dp)
             ) {
                 rowItems.forEach { item ->
                     X11QuickChip(
@@ -624,6 +726,7 @@ private fun BallChipGrid(items: List<BallChipItem>) {
                         active = item.active,
                         danger = item.danger,
                         enabled = item.enabled,
+                        compact = compact,
                         modifier = Modifier.weight(1f)
                     ) { item.onClick() }
                 }
@@ -647,6 +750,7 @@ private fun X11QuickChip(
     active: Boolean = false,
     danger: Boolean = false,
     enabled: Boolean = true,
+    compact: Boolean = false,
     onClick: () -> Unit
 ) {
     var pressed by remember { mutableStateOf(false) }
@@ -660,7 +764,7 @@ private fun X11QuickChip(
         verticalArrangement = Arrangement.Center,
         modifier = modifier
             .scale(scale)
-            .clip(RoundedCornerShape(11.dp))
+            .clip(RoundedCornerShape(if (compact) 10.dp else 11.dp))
             .background(
                 when {
                     !enabled -> Color(0x0AFFFFFF)
@@ -678,11 +782,11 @@ private fun X11QuickChip(
                     onTap = { if (enabled) onClick() }
                 )
             }
-            .padding(vertical = 5.dp)
+            .padding(vertical = if (compact) 3.dp else 5.dp)
     ) {
         Box(
             modifier = Modifier
-                .size(22.dp)
+                .size(if (compact) 18.dp else 22.dp)
                 .clip(CircleShape)
                 .background(
                     when {
@@ -692,9 +796,13 @@ private fun X11QuickChip(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            BallMenuIcon(icon, if (enabled) tint else Color(0x66B8C7D9))
+            BallMenuIcon(
+                icon,
+                if (enabled) tint else Color(0x66B8C7D9),
+                iconSize = if (compact) 13.dp else 16.dp
+            )
         }
-        Spacer(Modifier.height(2.dp))
+        Spacer(Modifier.height(if (compact) 1.dp else 2.dp))
         Text(
             label,
             color = when {
@@ -702,7 +810,7 @@ private fun X11QuickChip(
                 danger -> Color(0xFFFFB4B4)
                 else -> Color(0xFFDCE8F5)
             },
-            fontSize = 9.sp,
+            fontSize = if (compact) 8.5.sp else 9.sp,
             maxLines = 1
         )
     }
@@ -1099,10 +1207,22 @@ private fun BallMenuIcon(kind: BallIconKind, tint: Color, iconSize: Dp = 16.dp) 
  * 终端组 = 标签 + 4 行×44 + 分隔 ≈ +205dp（三组不同屏，互斥）。
  * 仅用于"菜单向上/向下弹"的启发式选择与碰撞检测 —— 菜单本体
  * heightIn(max=屏高-16) 可滚动，横屏矮屏下也完整可见（v6.0 修复）。
+ *
+ * v1.2.0（需求 3）：split=true（横屏双箱盒）时两列并排，菜单高度 =
+ * 较高一列（浏览器组 5 行紧凑芯片 + 标签 ≈ 200dp 上下）。
  */
 private fun menuHeightEstimate(
     density: androidx.compose.ui.unit.Density,
-    extraGroups: Int = 0
+    extraGroups: Int = 0,
+    compact: Boolean = false,
+    split: Boolean = false
 ): Float = with(density) {
-    (150.dp + 220.dp * extraGroups).toPx()
+    if (split) {
+        // 双箱盒：高度取较高一列（浏览器快捷 5 行 + 标签），非堆叠和
+        (if (compact) 205.dp else 235.dp).toPx()
+    } else {
+        // v1.1.0 compact 档（横屏矮屏）：芯片 ~36dp/行
+        (if (compact) 120.dp else 150.dp).toPx() +
+            (if (compact) 170.dp else 220.dp).toPx() * extraGroups
+    }
 }

@@ -338,7 +338,8 @@ object BrowserSessions {
  */
 fun BrowserTab.loadUrl(url: String) {
     this.url = url
-    this.title = url
+    // v1.1.0：回浏览器主页时标签标题显示「新标签」而非裸 URL
+    this.title = if (url == "linbox://home" || url.isEmpty()) "新标签" else url
     val wv = webView
     if (wv != null && !url.startsWith("linbox://")) {
         hasLoadedOnce = true

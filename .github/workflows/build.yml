@@ -1,0 +1,61 @@
+name: Build LinBrowser APK
+
+# 手动触发构建（Actions 页面 → Run workflow）
+# v1.1.0：用户要求 —— GitHub 构建 yml，手动触发
+on:
+  workflow_dispatch:
+    inputs:
+      buildType:
+        description: '构建类型'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - debug
+          - release
+          - both
+
+jobs:
+  build:
+    name: Build APK (${{ inputs.buildType || 'both' }})
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle (cached)
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build debug APK
+        if: ${{ inputs.buildType == 'debug' || inputs.buildType == 'both' || inputs.buildType == '' }}
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Build release APK (unsigned)
+        if: ${{ inputs.buildType == 'release' || inputs.buildType == 'both' || inputs.buildType == '' }}
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Upload debug APK artifact
+        if: ${{ inputs.buildType == 'debug' || inputs.buildType == 'both' || inputs.buildType == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: LinBrowser-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload release APK artifact
+        if: ${{ inputs.buildType == 'release' || inputs.buildType == 'both' || inputs.buildType == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: LinBrowser-release-unsigned-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

@@ -262,7 +262,8 @@ sealed class DownloadRequest {
     abstract val mime: String?
     abstract val contentLength: Long
 
-    /** http/https：经系统 DownloadManager（登录态 Cookie/Referer/UA 已快照）。 */
+    /** http/https：经应用内下载引擎 AppDownloader（登录态 Cookie/Referer/UA 已快照；
+     *  v1.3.0 起不再使用系统 DownloadManager，状态栏进度通知由本应用发出）。 */
     data class Http(
         override val suggestedName: String,
         override val mime: String?,

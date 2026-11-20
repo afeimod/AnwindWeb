@@ -418,6 +418,12 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
                             com.linbox.apps.browser.BrowserQuickBus.toggleView3d?.invoke()
                             expanded = false
                         },
+                        // v1.3.0：资源嗅探（swf/图片/媒体/脚本，勾选批量下载）
+                        BallChipItem(BallIconKind.SNIFF, "资源嗅探",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.openSniffer != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.openSniffer?.invoke()
+                            expanded = false
+                        },
                         // v1.1.0（用户需求 2）：屏幕方向 —— 竖屏/横屏/自动循环
                         // 切换并持久化；标签实时显示当前方向，点一下切到下一档
                         BallChipItem(
@@ -819,7 +825,9 @@ private enum class BallIconKind {
     KEYBOARD, TOUCH, FSGAME, CYCLE, FULLSCREEN, GEAR, HOME,
     ADD, PASTE, FONT_MINUS, FONT_PLUS, SYMBOL, X11, DISPLAY, PIP, STRETCH,
     // v6.9：浏览器组六枚
-    BACK, FORWARD, REFRESH, BOOKMARK, HISTORY, UA
+    BACK, FORWARD, REFRESH, BOOKMARK, HISTORY, UA,
+    // v1.3.0：资源嗅探
+    SNIFF
 }
 
 /** 图标配色（危险项统一红系；v6.2 增终端组七枚）。 */
@@ -853,6 +861,7 @@ private fun BallIconKind.tint(danger: Boolean): Color = if (danger) Color(0xFFFF
     BallIconKind.BOOKMARK -> Color(0xFFF2D06B)
     BallIconKind.HISTORY -> Color(0xFFC7A6FF)
     BallIconKind.UA -> Color(0xFF8FD6FF)
+    BallIconKind.SNIFF -> Color(0xFFE5484D)
 }
 
 /**
@@ -1192,6 +1201,20 @@ private fun BallMenuIcon(kind: BallIconKind, tint: Color, iconSize: Dp = 16.dp) 
                     style = s
                 )
                 drawLine(tint, Offset(9.4f * u, 18.6f * u), Offset(12.6f * u, 18.6f * u), s.width)
+            }
+            // v1.3.0 资源嗅探：放大镜 + 信号弧（嗅探意象）
+            BallIconKind.SNIFF -> {
+                drawCircle(color = tint, radius = 5.2f * u, center = Offset(9.6f * u, 9.2f * u), style = s)
+                drawLine(tint, Offset(13.4f * u, 13.2f * u), Offset(17.6f * u, 17.4f * u), s.width)
+                drawArc(
+                    color = tint,
+                    startAngle = -60f,
+                    sweepAngle = 45f,
+                    useCenter = false,
+                    topLeft = Offset(7.2f * u, 6.8f * u),
+                    size = Size(4.8f * u, 4.8f * u),
+                    style = s
+                )
             }
         }
     }

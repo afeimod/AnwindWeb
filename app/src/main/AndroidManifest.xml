@@ -65,6 +65,15 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- v1.3.0：应用内下载引擎 —— 通知「取消」按钮 / 划掉通知取消下载 -->
+        <receiver
+            android:name="com.linbox.apps.browser.DownloadCancelReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.linbox.browser.ACTION_CANCEL_DOWNLOAD" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

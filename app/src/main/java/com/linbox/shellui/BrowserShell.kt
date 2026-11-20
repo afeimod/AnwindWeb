@@ -17,6 +17,7 @@ import androidx.compose.ui.platform.LocalDensity
 import com.linbox.LinBoxApp
 import com.linbox.apps.browser.BrowserContent
 import com.linbox.apps.browser.DownloadPromptDialog
+import com.linbox.apps.browser.ResourceSnifferPanel
 import com.linbox.core.input.MouseController
 import com.linbox.core.input.MouseCursorOverlay
 import com.linbox.core.input.TrackpadRouter
@@ -99,6 +100,9 @@ fun BrowserShell(sharedText: String? = null) {
 
         // ===== 5. 下载重命名确认弹窗（最顶层） =====
         DownloadPromptDialog()
+
+        // ===== 6. 资源嗅探面板（悬浮球菜单「资源嗅探」打开；v1.3.0） =====
+        ResourceSnifferPanel()
     }
 }
 

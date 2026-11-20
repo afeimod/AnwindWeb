@@ -296,6 +296,7 @@ internal fun BrowserContent(scope: WindowContentScope) {
                     onShowBookmarks = { showBookmarks = !showBookmarks },
                     onShowHistory = { showHistory = !showHistory },
                     onToggleView3d = { showView3dSettings = true },
+                    onOpenSniffer = { com.linbox.apps.browser.ResourceSnifferPanelBus.open() },
                     onBookmark = {
                         val url = tabManager.addressInput
                         if (url.isNotEmpty()) {
@@ -1141,6 +1142,8 @@ object BrowserQuickBus {
     var showBookmarks: (() -> Unit)? = null
     var showHistory: (() -> Unit)? = null
     var toggleView3d: (() -> Unit)? = null
+    /** v1.3.0：打开资源嗅探面板（嗅探 swf/图片/媒体/脚本，勾选批量下载）。 */
+    var openSniffer: (() -> Unit)? = null
     var bookmarkCurrent: (() -> Unit)? = null
     /** LinBrowser 独立版：关闭浏览器（收起应用回桌面，会话存活）。 */
     var exitBrowser: (() -> Unit)? = null
@@ -1157,6 +1160,7 @@ object BrowserQuickBus {
         onShowBookmarks: () -> Unit,
         onShowHistory: () -> Unit,
         onToggleView3d: () -> Unit,
+        onOpenSniffer: () -> Unit = {},
         onBookmark: () -> Unit,
         onExit: () -> Unit = {}
     ) {
@@ -1171,6 +1175,7 @@ object BrowserQuickBus {
         showBookmarks = onShowBookmarks
         showHistory = onShowHistory
         toggleView3d = onToggleView3d
+        openSniffer = onOpenSniffer
         bookmarkCurrent = onBookmark
         exitBrowser = onExit
         available = true
@@ -1187,6 +1192,7 @@ object BrowserQuickBus {
         showBookmarks = null
         showHistory = null
         toggleView3d = null
+        openSniffer = null
         bookmarkCurrent = null
         exitBrowser = null
     }

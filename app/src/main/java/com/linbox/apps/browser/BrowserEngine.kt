@@ -1,6 +1,6 @@
 package com.linbox.apps.browser
 
-import android.app.DownloadManager
+// v1.3.0：DownloadManager 已由应用内下载引擎 AppDownloader 整体替换
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -427,6 +427,8 @@ object BrowserEngine {
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
             if (url != null) {
+                // v1.3.0：资源嗅探器跟随主导航（面板标题/目录树置顶当前站）
+                ResourceSniffer.onPageStarted(url)
                 // v2.14.1：同一 https 地址被重新导航（重试/地址栏回车/书签重开）时，
                 // 重置自动回退标记，允许再次尝试 https 而非直接报错
                 if (url == tab.httpsFallbackUrl) tab.httpsFallbackUrl = null
@@ -661,6 +663,16 @@ object BrowserEngine {
             view: WebView,
             request: WebResourceRequest
         ): WebResourceResponse? {
+            // v1.3.0：资源嗅探 —— 页面发起的所有 http/https 子资源
+            //（图片/脚本/样式/媒体/XHR/SWF）被动记录，悬浮球「资源嗅探」
+            // 面板可勾选批量下载；零额外流量（不预取，只记 URL）。
+            val snifferUrl = request.url.toString()
+            if (request.url.host != RUFFLE_VIRTUAL_HOST &&
+                (snifferUrl.startsWith("http://", ignoreCase = true) ||
+                    snifferUrl.startsWith("https://", ignoreCase = true))
+            ) {
+                ResourceSniffer.record(snifferUrl)
+            }
             // v2.14.4：Ruffle 引擎本地化 —— 虚拟域全部从 assets 供给，
             // 彻底摆脱 jsdelivr/unpkg 在国内网络的 TLS 掐断（日志证据：
             // ssl_client_socket_impl handshake failed net_error -100，
@@ -910,6 +922,8 @@ object BrowserEngine {
                             val data = conn.inputStream.readBytes()
                             if (swfCache.size >= 10) swfCache.clear()
                             swfCache[swfUrl] = data
+                            // v1.3.0：嗅探器回写真实大小（资源面板展示）
+                            ResourceSniffer.updateSize(url, data.size.toLong())
                             return WebResourceResponse(
                                 "application/x-shockwave-flash", null,
                                 200, "OK", swfCorsHeaders, ByteArrayInputStream(data)
@@ -1572,36 +1586,27 @@ internal object BrowserDownloads {
     /**
      * 用户在重命名确认对话框点「下载」后真正开始下载/落盘
      * （DownloadPromptBus.confirm 调用）。
+     *
+     * v1.3.0：Http 分支改走 [AppDownloader] 应用内下载引擎（状态栏进度
+     * 通知 + 完成点击直接打开文件），不再使用系统 DownloadManager ——
+     * 用户反馈「下载为何调用的是自带浏览器，用我的项目浏览器直接下载」。
      */
     fun startConfirmed(request: DownloadRequest, filename: String) {
         when (request) {
-            is DownloadRequest.Http -> runCatching {
+            is DownloadRequest.Http -> {
                 val ctx = LinBoxApp.get()
-                val req = DownloadManager.Request(Uri.parse(request.url)).apply {
-                    if (!request.mime.isNullOrBlank()) setMimeType(request.mime)
-                    request.userAgent?.let { addRequestHeader("User-Agent", it) }
-                    // 登录态下载：DownloadManager 不共享 WebView Cookie
-                    request.cookie?.takeIf { it.isNotBlank() }?.let {
-                        addRequestHeader("Cookie", it)
-                    }
-                    // 部分站点（网盘/图床）校验 Referer
-                    request.referer?.let { addRequestHeader("Referer", it) }
-                    setDestinationInExternalPublicDir(
-                        Environment.DIRECTORY_DOWNLOADS, filename
+                AppDownloader.enqueue(
+                    AppDownloader.Job(
+                        url = request.url,
+                        filename = filename,
+                        mime = request.mime,
+                        userAgent = request.userAgent,
+                        cookie = request.cookie,
+                        referer = request.referer
                     )
-                    setTitle(filename)
-                    setNotificationVisibility(
-                        DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
-                    )
-                    if (request.mime == "application/vnd.android.package-archive") {
-                        @Suppress("DEPRECATION")
-                        allowScanningByMediaScanner()
-                    }
-                }
-                val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                dm.enqueue(req)
+                )
                 toast(ctx, "开始下载：$filename")
-            }.onFailure { toast(LinBoxApp.get(), "下载失败: ${it.message}") }
+            }
 
             is DownloadRequest.Data -> {
                 val ctx = LinBoxApp.get()
@@ -1832,6 +1837,123 @@ internal object BrowserDownloads {
             toast(ctx, "已保存到应用目录 ${dst.name}")
             "app/${dst.name}"
         }.onFailure { tmp.delete() }.getOrNull()
+    }
+
+    /**
+     * v1.3.0：带子目录的临时文件落盘（[AppDownloader] 应用内下载引擎 +
+     * 资源嗅探批量下载用）。子目录逐段清洗（防 ../ 逃逸），三级回退同
+     * [saveTempFile]；返回落盘结果（File 直写/应用目录，Uri = MediaStore）。
+     */
+    fun saveTempFileTo(
+        ctx: Context,
+        tmp: File,
+        filename: String,
+        mimetype: String?,
+        subdir: String
+    ): AppDownloader.Saved? {
+        val name = sanitize(filename)
+        val sub = sanitizeSubdir(subdir)
+
+        // 1) 公共 Downloads/<sub>/ 直写（优先 rename，跨分区退 copy）
+        runCatching {
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                sub
+            )
+            if (!dir.exists()) dir.mkdirs()
+            if (dir.canWrite()) {
+                val dst = uniqueFile(dir, name)
+                if (!tmp.renameTo(dst)) {
+                    tmp.copyTo(dst, overwrite = true)
+                    tmp.delete()
+                }
+                scan(ctx, dst.absolutePath, mimetype)
+                return AppDownloader.Saved(
+                    file = dst, uri = null,
+                    display = "Download/${if (sub.isBlank()) "" else "$sub/"}${dst.name}"
+                )
+            }
+        }
+        // 2) MediaStore.Downloads（API 29+；RELATIVE_PATH 支持子目录）
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            runCatching {
+                val collection = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                val unique = uniqueMediaStoreName(ctx, if (sub.isBlank()) name else "${sub.replace('/', '_')}_$name")
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Downloads.DISPLAY_NAME, unique)
+                    put(
+                        android.provider.MediaStore.Downloads.MIME_TYPE,
+                        mimetype ?: "application/octet-stream"
+                    )
+                    put(
+                        android.provider.MediaStore.Downloads.RELATIVE_PATH,
+                        Environment.DIRECTORY_DOWNLOADS +
+                            (if (sub.isBlank()) "" else "/$sub")
+                    )
+                }
+                val uri = ctx.contentResolver.insert(collection, values)
+                    ?: error("MediaStore insert null")
+                ctx.contentResolver.openOutputStream(uri)?.use { out ->
+                    tmp.inputStream().use { it.copyTo(out) }
+                } ?: error("openOutputStream null")
+                tmp.delete()
+                return AppDownloader.Saved(
+                    file = null, uri = uri,
+                    display = "Download/${if (sub.isBlank()) "" else "$sub/"}$unique"
+                )
+            }
+        }
+        // 3) 应用专属外部目录
+        return runCatching {
+            val dir = File(
+                ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                    ?: File(ctx.filesDir, "Download").also { it.mkdirs() },
+                sub
+            )
+            if (!dir.exists()) dir.mkdirs()
+            val dst = uniqueFile(dir, name)
+            if (!tmp.renameTo(dst)) {
+                tmp.copyTo(dst, overwrite = true)
+                tmp.delete()
+            }
+            AppDownloader.Saved(
+                file = dst, uri = null,
+                display = "应用目录/${if (sub.isBlank()) "" else "$sub/"}${dst.name}"
+            )
+        }.onFailure { tmp.delete() }.getOrNull()
+    }
+
+    /** 子目录路径段逐段清洗（防空段 / 点段 / `..` 逃逸 / 非法字符；最深 8 层）。 */
+    private fun sanitizeSubdir(subdir: String): String =
+        subdir.split('/', '\\')
+            .map { sanitize(it) }
+            .filter { it.isNotBlank() && it != "." && it != ".." }
+            .take(8)
+            .joinToString("/")
+
+    /** 字节数人性化（v1.30 下载进度通知用）。 */
+    fun fmtBytes(bytes: Long): String = when {
+        bytes <= 0 -> "…"
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> String.format("%.1f KB", bytes / 1024.0)
+        bytes < 1024L * 1024 * 1024 -> String.format("%.2f MB", bytes / 1024.0 / 1024.0)
+        else -> String.format("%.2f GB", bytes / 1024.0 / 1024.0 / 1024.0)
+    }
+
+    /** 文件名 → MIME（下载完成通知的打开 Intent 用）。 */
+    fun guessMime(filename: String): String? {
+        val ext = filename.substringAfterLast('.', "").lowercase()
+        val mapped = runCatching {
+            MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+        }.getOrNull()
+        if (!mapped.isNullOrBlank()) return mapped
+        return when (ext) {
+            "swf" -> "application/x-shockwave-flash"
+            "m3u8" -> "application/vnd.apple.mpegurl"
+            "ts" -> "video/mp2t"
+            "apk" -> "application/vnd.android.package-archive"
+            else -> "application/octet-stream"
+        }
     }
 
     /** MediaStore Downloads 集合中重名自动 (n)（对齐 uniqueFile 语义）。 */

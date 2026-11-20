@@ -2,7 +2,9 @@
 
 LinBox 浏览器独立版 —— 从 [LinBox](https://github.com/afeimod/linbox)（Windows 容器桌面）抽取的**独立安卓浏览器应用**，浏览器功能 100% 保留，虚拟手柄 / 悬浮球 / 虚拟键盘 / 触控板整套输入系统随行，并修复了下载相关的一批问题。
 
-> **v1.2.3（2025-11 更新）**：CI release 构建失败修复 + 零告警清理——**lintVitalRelease 致命错误 `ExpiredTargetSdkVersion`**（targetSdk 28 低于 Play 要求 33+；侧载分发不上 Play，该检查已关闭，targetSdk 28 保留是为了 legacy 存储直写公共 Downloads）；`onActivityResult` 迁移 Activity Result API（上传选择器改 launcher 回调，顺带修复大文件上传可能的主线程阻塞：复制移后台线程 + 会话一次性投递）；Toolbar 移除并入悬浮球的未用回调参数；`WebView.getScale()`/`allowFileAccessFromFileURLs` 等废弃 API 收敛到统一抑制点（保留原语义）；其余未用变量/参数全部清理。
+> **v1.3.0（2025-11 更新）**：① **下载全面应用内**——http/https 不再走系统 DownloadManager（不再跳系统下载器/自带浏览器），应用内引擎直连（Cookie/Referer/UA 转发登录态可用），**状态栏进度条通知**（已下载/总大小，可取消），完成通知点击直接打开文件；② **资源嗅探**（悬浮球菜单「资源嗅探」）——被动采集页面加载的全部 http/https 子资源（零额外流量），按站点+文件夹分组，类型过滤（SWF/图片/视频/音频/脚本/其他），勾选文件或整目录批量下载，落盘 `Download/Sniffer/<站点>/<目录>/` 保留文件夹结构；swf 经 Ruffle 拦截路径回写真实大小；③ 下载并发限 3、批量排队，http 失败自动 https 重试。
+>
+> **v1.2.3**：CI release 构建失败修复 + 零告警清理——**lintVitalRelease 致命错误 `ExpiredTargetSdkVersion`**（targetSdk 28 低于 Play 要求 33+；侧载分发不上 Play，该检查已关闭，targetSdk 28 保留是为了 legacy 存储直写公共 Downloads）；`onActivityResult` 迁移 Activity Result API（上传选择器改 launcher 回调，顺带修复大文件上传可能的主线程阻塞：复制移后台线程 + 会话一次性投递）；Toolbar 移除并入悬浮球的未用回调参数；`WebView.getScale()`/`allowFileAccessFromFileURLs` 等废弃 API 收敛到统一抑制点（保留原语义）；其余未用变量/参数全部清理。
 >
 > **v1.2.2**：修复勾选多选上传不落位（vivo 等厂商照片/文件选择器勾选后按确认，页面收不到文件；点选单选正常）。根因：厂商选择器勾选多选的结果走 `ClipData` 且授权对 WebView 直读不总有效；修复：结果收集改为 data + ClipData 全量手动收集（不依赖 resultCode），回传前先复制到应用缓存目录再经 FileProvider 交给 WebView，彻底绕开厂商 provider 权限怪癖。
 >
@@ -29,18 +31,20 @@ LinBox 浏览器独立版 —— 从 [LinBox](https://github.com/afeimod/linbox)
 - 内网 https→http 自动回退、渲染进程崩溃自愈、WebGL 坏上下文守卫
 - 本地 HTML（content:// SAF）打开
 
-### 下载（本次修复 + 增强）
+### 下载（v1.3.0 全面应用内）
 - **下载前重命名确认对话框**：文件名可编辑、显示大小 / 类型 / 来源 / 保存位置，确认才开始下载，取消零残留
-- http/https → 系统 DownloadManager（登录态 Cookie / Referer / UA 转发，系统通知可见进度）
+- http/https → **应用内下载引擎**（v1.3.0，不再走系统 DownloadManager / 不跳自带浏览器；登录态 Cookie / Referer / UA 转发；http 失败自动 https 重试；并发限 3 批量排队）
+- **状态栏进度条通知**：已下载 / 总大小实时刷新，通知可「取消」、划掉即取消；完成通知点击直接打开文件
+- **资源嗅探**（v1.3.0，悬浮球菜单「资源嗅探」）：被动采集页面加载的全部 http/https 子资源（图片/脚本/媒体/XHR/SWF，零额外流量），按站点+文件夹分组，类型过滤（SWF/图片/视频/音频/脚本/其他），勾选文件或整目录批量下载，落盘 `Download/Sniffer/<站点>/<目录>/` 保留文件夹结构；swf 经 Ruffle 拦截路径回写真实大小
 - blob: → 页内 XHR 分块桥读取 → 重命名确认 → 落盘
 - data: → 直接解码 → 重命名确认 → 落盘
-- **落盘三级回退**：公共 Downloads 直写 → MediaStore.Downloads（Android 10+ 免权限）→ 应用专属目录兜底
+- **落盘三级回退**：公共 Downloads 直写（含 Sniffer 子目录）→ MediaStore.Downloads（Android 10+ 免权限）→ 应用专属目录兜底
 - 重名自动 `(n)` 后缀；非法文件名字符清洗；MIME 补扩展名
 - **修复文件上传断链 + 勾选多选不落位**（input[type=file] 选完文件页面无响应；vivo 等厂商选择器勾选多选后页面收不到文件）：FileChooserBus 统一登记 / 回传；结果 data + ClipData 全量收集（不依赖 resultCode），回传前复制到应用缓存经 FileProvider 交付，多选 / 单选 / 点选均稳
 
 ### 输入系统（完整保留）
 - **虚拟手柄**：玻璃摇杆 8 向、十字键、径向按钮、编辑布局、位置尺寸调节、按键映射（全键盘 + 鼠标）、ARROWS/WASD 方向模式、经典 / 简单预设、.vgp 配置保存读取
-- **悬浮球**：可拖动常驻炫彩球，展开菜单 = 手柄控制 + **浏览器快捷组**（后退 / 前进 / 刷新 / 主页 / 收藏 / 书签 / 历史 / UA / 全屏 / 3D 视角 / 屏幕方向 / 主页背景 / 关闭浏览器）；菜单为嵌套双箱盒自适应布局，横竖屏 / 矮屏均完整显示不出屏（v1.2.0）
+- **悬浮球**：可拖动常驻炫彩球，展开菜单 = 手柄控制 + **浏览器快捷组**（后退 / 前进 / 刷新 / 主页 / 收藏 / 书签 / 历史 / UA / 全屏 / 3D 视角 / 屏幕方向 / 主页背景 / **资源嗅探** / 关闭浏览器）；菜单为嵌套双箱盒自适应布局，横竖屏 / 矮屏均完整显示不出屏（v1.2.0）
 - **虚拟键盘**：QWERTY + 功能行 + 小键盘，可拖动 / 捏合缩放 / 多主题 / 剪贴板条 / 触觉反馈
 - **触控板模式**：单指移指针、轻点单击、长按拖拽、双指滚动、双指轻点右键
 - **虚拟鼠标指针**：速度 / 主题 / 大小可调，涟漪反馈

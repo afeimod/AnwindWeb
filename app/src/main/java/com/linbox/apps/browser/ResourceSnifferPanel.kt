@@ -247,7 +247,13 @@ fun ResourceSnifferPanel() {
                                     modifier = Modifier.weight(1f)
                                 )
                                 Text(
-                                    if (res.size > 0) formatBytesInternal(res.size) else "—",
+                                    when {
+                                        res.size > 0 -> formatBytesInternal(res.size)
+                                        // v1.3.1：DOM 链接扫描采集的下载源（大小未知，
+                                        // 以下载时通知为准）
+                                        res.fromLink -> "链接"
+                                        else -> "—"
+                                    },
                                     color = Color(0xFF9FB3C8), fontSize = 10.sp
                                 )
                                 Spacer(Modifier.width(8.dp))
@@ -402,6 +408,9 @@ private fun KindDot(kind: ResourceSniffer.Kind) {
         ResourceSniffer.Kind.VIDEO -> Color(0xFF8E4EC6)
         ResourceSniffer.Kind.AUDIO -> Color(0xFFFFB224)
         ResourceSniffer.Kind.SCRIPT -> Color(0xFF2E7CF6)
+        // v1.3.1：ROM / 压缩包（真实下载源）
+        ResourceSniffer.Kind.ROM -> Color(0xFFFF6B35)
+        ResourceSniffer.Kind.ARCHIVE -> Color(0xFF39C5CF)
         ResourceSniffer.Kind.OTHER -> Color(0xFF9FB3C8)
     }
     Box(
@@ -432,6 +441,20 @@ private fun kindMime(r: ResourceSniffer.Res): String? = when (r.kind) {
         "js", "mjs" -> "application/javascript"; "css" -> "text/css"
         "json" -> "application/json"; "xml" -> "application/xml"
         else -> "text/html"
+    }
+    // v1.3.1：ROM / 压缩包 MIME（MediaStore 落盘用）
+    ResourceSniffer.Kind.ROM -> when (r.ext) {
+        "iso", "img", "cue", "chd" -> "application/x-iso9660-image"
+        else -> "application/octet-stream"
+    }
+    ResourceSniffer.Kind.ARCHIVE -> when (r.ext) {
+        "zip" -> "application/zip"
+        "7z" -> "application/x-7z-compressed"
+        "rar" -> "application/vnd.rar"
+        "apk", "xapk" -> "application/vnd.android.package-archive"
+        "jar" -> "application/java-archive"
+        "tar", "gz", "bz2", "xz" -> "application/x-tar"
+        else -> "application/octet-stream"
     }
     ResourceSniffer.Kind.OTHER -> null
 }

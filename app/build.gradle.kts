@@ -16,8 +16,8 @@ android {
         applicationId = "com.linbox.browser"
         minSdk = 24
         targetSdk = 28
-        versionCode = 7
-        versionName = "1.3.0"
+        versionCode = 8
+        versionName = "1.3.1"
 
         // 无原生代码（termux PTY / DAC 桥已随容器栈移除）
         ndk {

@@ -550,6 +550,21 @@ object BrowserEngine {
                     "try{void document.body&&document.body.offsetHeight;}catch(e){}", null
                 )
             }, 300)
+
+            // ===== v1.3.1：资源嗅探 —— DOM 下载链接扫描 =====
+            // ROM/游戏站的真实下载源（.swf/.zip/.nes 等）多以 <a> 链接形式
+            // 挂在页面上，不点击不加载、不经 shouldInterceptRequest ——
+            // 只有主动扫 DOM 才能采集。立即扫一次 + 1.5s 后补扫（懒加载
+            // 列表派屏后新链接）。去重在 ResourceSniffer 内部（seen 表）。
+            if (url != null && (url.startsWith("http") || url.startsWith("file:"))) {
+                sniffDomLinks(view)
+                val wref = WeakReference(view)
+                view?.postDelayed({
+                    val wv = wref.get() ?: return@postDelayed
+                    if (wv.tag == TAG_DESTROYED) return@postDelayed
+                    sniffDomLinks(wv)
+                }, 1500)
+            }
         }
 
         /**
@@ -696,10 +711,25 @@ object BrowserEngine {
             // CORS 头 + Cookie 转发 + 防盗链 Referer，否则引擎报跨域/403。
             // 只拦截真正的 SWF 资源请求（含 4399 的 dw-XX 命名模式），不影响普通浏览。
             val url = uri.toString()
-            val isSwfRequest = url.endsWith(".swf", ignoreCase = true) ||
-                url.contains(".swf?", ignoreCase = true) ||
-                (url.contains("4399.com") &&
-                    (url.contains("/dw-") || url.contains("flash_tm3") || url.contains("flash20")))
+            // v1.3.1：以「去查询串的路径」判扩展名，并加误伤防护 ——
+            // 4399 模式里的 "flash20" 会命中站内 player JS（如
+            // flash2023.js 等静态资源），被当 SWF 原生下载并以 swf MIME
+            // 返回 → 页面脚本损坏 → Flash 引导链全灭。明确的静态资源
+            // （js/css/图片/页面）绝不拦截。
+            val urlPath = url.substringBefore('?').substringBefore('#')
+            val definitelyNotSwf = urlPath.endsWith(".js", true) ||
+                urlPath.endsWith(".css", true) ||
+                urlPath.endsWith(".png", true) || urlPath.endsWith(".jpg", true) ||
+                urlPath.endsWith(".jpeg", true) || urlPath.endsWith(".gif", true) ||
+                urlPath.endsWith(".webp", true) || urlPath.endsWith(".html", true) ||
+                urlPath.endsWith(".htm", true)
+            val isSwfRequest = !definitelyNotSwf && (
+                urlPath.endsWith(".swf", ignoreCase = true) ||
+                    url.contains(".swf?", ignoreCase = true) ||
+                    (url.contains("4399.com") &&
+                        (urlPath.contains("/dw-") || url.contains("flash_tm3") ||
+                            url.contains("flash20")))
+                )
             if (isSwfRequest) {
                 return try {
                     interceptSwf(url, request)
@@ -742,6 +772,32 @@ object BrowserEngine {
                 })();
             """.trimIndent()
             view.evaluateJavascript(js, null)
+        }
+
+        /**
+         * v1.3.1：DOM 下载链接扫描 → 资源嗅探面板。
+         * evaluateJavascript 回传 JSON 数组文本（"[]" = 无命中），
+         * 解析后批量 [ResourceSniffer.recordLinks] 入库（主线程回调，
+         * 内部持锁去重，与 IO 线程的 record 互斥安全）。
+         */
+        private fun sniffDomLinks(view: WebView?) {
+            if (view == null || view.tag == TAG_DESTROYED) return
+            try {
+                view.evaluateJavascript(SNIFF_LINKS_SCRIPT) { result ->
+                    if (result == null || result.length < 3) return@evaluateJavascript
+                    try {
+                        val arr = org.json.JSONArray(result)
+                        val urls = ArrayList<String>(arr.length())
+                        for (i in 0 until arr.length()) {
+                            val u = arr.optString(i)
+                            if (u.isNotBlank()) urls.add(u)
+                        }
+                        if (urls.isNotEmpty()) ResourceSniffer.recordLinks(urls)
+                    } catch (_: Exception) {
+                    }
+                }
+            } catch (_: Exception) {
+            }
         }
 
         // ====================================================================
@@ -794,7 +850,14 @@ object BrowserEngine {
             // 路径穿越防护：只允许 assets/ruffle/ 下的直接文件名
             if (name.isEmpty() || name.contains("..") || name.contains('/')) return notFound()
             return try {
-                val stream = ctx.assets.open("$RUFFLE_ASSET_DIR/$name")
+                // v1.3.1：双路径兜底 —— assets/ruffle/<file>（源码目录直
+                // 打包）失败再试 assets/<file>（白名单暂存根路径），两套
+                // 打包布局都能命中，引擎资产永不 404。
+                val stream = try {
+                    ctx.assets.open("$RUFFLE_ASSET_DIR/$name")
+                } catch (_: Exception) {
+                    ctx.assets.open(name)
+                }
                 val mime = when {
                     name.endsWith(".wasm", true) -> "application/wasm"
                     name.endsWith(".js", true) -> "text/javascript"
@@ -919,7 +982,18 @@ object BrowserEngine {
                         conn.connect()
                         val responseCode = conn.responseCode
                         if (responseCode in 200..299) {
+                            // v1.3.1：超大 SWF 交给 WebView 自身流式加载
+                            //（全量缓冲进 ByteArray 会 OOM / Int 溢出）
+                            val declared = conn.contentLength
+                            if (declared > MAX_SWF_BYTES) {
+                                conn.disconnect()
+                                return null
+                            }
                             val data = conn.inputStream.readBytes()
+                            if (data.size > MAX_SWF_BYTES) {
+                                conn.disconnect()
+                                return null
+                            }
                             if (swfCache.size >= 10) swfCache.clear()
                             swfCache[swfUrl] = data
                             // v1.3.0：嗅探器回写真实大小（资源面板展示）
@@ -947,12 +1021,13 @@ object BrowserEngine {
                 }
             }
 
-            // 4. 全部失败：返回 502 + CORS 头（而非 null）——null 会让 WebView 自行
-            //    重发原始请求，页面侧因 Mixed Content/CORS 被阻断且无从感知。
-            return WebResourceResponse(
-                "application/x-shockwave-flash", null, 502, "Bad Gateway",
-                swfCorsHeaders, ByteArrayInputStream(ByteArray(0))
-            )
+            // 4. 全部失败（v1.3.1 关键修复）：返回 null 让 WebView 用自身网络栈
+            //    重发原始请求。旧实现返回 502 + 空体 —— 原生下载一旦失败
+            //    （CDN 拒绝转发头 / TLS 指纹 / 证书链 / 重定向链等），Ruffle
+            //    拿到空 SWF 直接报错，「Ruffle 对网站的内置」全灭。null 兜底：
+            //    同源场景 WebView 可正常加载（自身网络栈正常处理重定向/
+            //    gzip/证书）；跨域场景与旧版同样失败，但不会更糟。
+            return null
         }
 
         companion object {
@@ -974,6 +1049,9 @@ object BrowserEngine {
              *  卡住；后备源同步升级避免降级到坏版本 */
             private const val RUFFLE_CDN_MIRROR = "https://registry.npmmirror.com/@ruffle-rs/ruffle/0.5.0/files/"
             private const val RUFFLE_CDN_JSDELIVR = "https://cdn.jsdelivr.net/npm/@ruffle-rs/ruffle@0.5.0/"
+
+            /** v1.3.1：单文件 SWF 全量缓冲上限（超过交 WebView 自身流式加载，防 OOM） */
+            private const val MAX_SWF_BYTES = 128 * 1024 * 1024
 
             /**
              * WebGL 像素管线守卫（v2.14.4，HTML5 游戏灰屏兜底）：
@@ -1310,6 +1388,46 @@ object BrowserEngine {
                     });
                   } catch(e) {}
                 })();
+            """
+
+            /**
+             * v1.3.1：DOM 下载链接扫描脚本（onPageFinished 注入，返回
+             * 绝对 URL 数组，由 [TabWebViewClient.sniffDomLinks] 解析入库）。
+             * 采集 a[href] / area[href] / embed[src] / object[data] /
+             * source[src] 中扩展名命中下载类型的链接（swf / 主机 ROM /
+             * 压缩包 / 媒体 / exe / pdf），每次上限 400 条；路径含 .swf
+             *（Flash 站资源目录）与 4399 无扩展名模式（/dw-、flash_tm3）
+             * 同源识别。纯 JS 无 Kotlin 插值。
+             */
+            private const val SNIFF_LINKS_SCRIPT = """
+                (function(){
+                  try {
+                    var EXT = /\.(swf|nes|fds|sfc|smc|gba|gbc|gb|nds|3ds|n64|z64|v64|md|smd|gen|sms|gg|ws|wsc|ngp|npc|pce|vb|a26|a78|col|int|vec|dsk|cue|iso|img|bin|rom|chd|zip|7z|rar|tar|gz|bz2|xz|apk|xapk|jar|obb|exe|pdf|mp3|mp4|avi|mkv|flv|wav|flac|ogg|m4a)$/i;
+                    var STATIC = /\.(js|css|png|jpe?g|gif|webp|svg|ico|html?)$/i;
+                    var out = [], seen = {};
+                    var nodes = document.querySelectorAll('a[href],area[href],embed[src],object[data],source[src]');
+                    var base = document.baseURI || location.href;
+                    for (var i = 0; i < nodes.length && out.length < 400; i++) {
+                      var el = nodes[i];
+                      var u = el.getAttribute('href') || el.getAttribute('src') || el.getAttribute('data') || '';
+                      if (!u || u.length < 5 || u.charAt(0) === '#') continue;
+                      if (/^(javascript|mailto|tel|about|blob|data):/i.test(u)) continue;
+                      try { u = new URL(u, base).href; } catch (e) { continue; }
+                      if (!/^https?:/i.test(u)) continue;
+                      var end = u.length, q = u.indexOf('?');
+                      if (q >= 0) end = q; else { var h = u.indexOf('#'); if (h >= 0) end = h; }
+                      var path = u.substring(0, end).toLowerCase();
+                      var isDl = EXT.test(path) || path.indexOf('.swf') >= 0;
+                      // 4399 无扩展名 swf 模式（与 Kotlin 端 classify 同源：
+                      // 按链接 URL 的 host 判定，静态资源防误伤）
+                      if (!isDl && !STATIC.test(path) && /4399\.com/i.test(u) &&
+                          (path.indexOf('/dw-') >= 0 || path.indexOf('flash_tm3') >= 0 ||
+                           path.indexOf('flash20') >= 0)) isDl = true;
+                      if (isDl && !seen[u]) { seen[u] = 1; out.push(u); }
+                    }
+                    return out;
+                  } catch (e) { return []; }
+                })()
             """
         }
     }

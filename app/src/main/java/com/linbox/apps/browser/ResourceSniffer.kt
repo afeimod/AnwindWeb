@@ -1,6 +1,8 @@
 package com.linbox.apps.browser
 
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import java.net.URI
 import kotlin.concurrent.withLock
 
@@ -75,8 +77,10 @@ object ResourceSniffer {
             val res = parse(urlRaw) ?: return
             if (seen.size >= MAX) {
                 // 环形截断：丢弃最早 1/4（批量清理比逐条省事）
-                val it = seen.entries.iterator()
-                repeat(MAX / 4) { if (it.hasNext()) { it.next(); it.remove() } }
+                // 注意：迭代器不能命名为 it —— repeat 的 lambda 隐式参数也叫 it，
+                // 会遮蔽外层局部变量导致 hasNext/next 解析失败
+                val iter = seen.entries.iterator()
+                repeat(MAX / 4) { if (iter.hasNext()) { iter.next(); iter.remove() } }
             }
             seen[urlRaw] = res
             count = seen.size

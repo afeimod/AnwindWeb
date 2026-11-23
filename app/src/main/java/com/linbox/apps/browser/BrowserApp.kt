@@ -423,9 +423,23 @@ internal fun BrowserContent(scope: WindowContentScope) {
             }
             if (showBrowserMenu) {
                 BrowserMenuDialog(
+                    uaMode = uaMode,
+                    fullscreen = isFullscreen,
+                    onBack = { tabManager.getTab(tabManager.activeTabId)?.goBack(); showBrowserMenu = false },
+                    onForward = { tabManager.getTab(tabManager.activeTabId)?.goForward(); showBrowserMenu = false },
+                    onRefresh = { tabManager.getTab(tabManager.activeTabId)?.refresh(); showBrowserMenu = false },
+                    onHome = {
+                        tabManager.getTab(tabManager.activeTabId)?.loadUrl(defaultHome)
+                        tabManager.addressInput = if (defaultHome == "linbox://home") "" else defaultHome
+                        showBrowserMenu = false
+                    },
+                    onTabs = { showBrowserMenu = false; showTabSwitcher = true },
                     onBookmarks = { showBrowserMenu = false; showBookmarks = true },
                     onHistory = { showBrowserMenu = false; showHistory = true },
-                    onRefresh = { tabManager.getTab(tabManager.activeTabId)?.refresh(); showBrowserMenu = false },
+                    onToggleUa = { toggleUaMode(); showBrowserMenu = false },
+                    onToggleFullscreen = { toggleFullscreen(); showBrowserMenu = false },
+                    onSniffer = { com.linbox.apps.browser.ResourceSnifferPanelBus.open(); showBrowserMenu = false },
+                    onSettings = { showBrowserMenu = false; showView3dSettings = true },
                     onDismiss = { showBrowserMenu = false }
                 )
             }
@@ -1185,22 +1199,58 @@ private fun TabSwitcherDialog(
 
 @Composable
 private fun BrowserMenuDialog(
+    uaMode: String,
+    fullscreen: Boolean,
+    onBack: () -> Unit,
+    onForward: () -> Unit,
+    onRefresh: () -> Unit,
+    onHome: () -> Unit,
+    onTabs: () -> Unit,
     onBookmarks: () -> Unit,
     onHistory: () -> Unit,
-    onRefresh: () -> Unit,
+    onToggleUa: () -> Unit,
+    onToggleFullscreen: () -> Unit,
+    onSniffer: () -> Unit,
+    onSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val theme = LocalWinTheme.current
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = theme.windowBackgroundColor,
+        titleContentColor = theme.buttonTextColor,
+        textContentColor = theme.buttonTextColor,
         title = { Text("浏览器菜单") },
         text = {
-            Column {
-                TextButton(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) { Text("刷新页面") }
-                TextButton(onClick = onBookmarks, modifier = Modifier.fillMaxWidth()) { Text("书签") }
-                TextButton(onClick = onHistory, modifier = Modifier.fillMaxWidth()) { Text("历史记录") }
+            Column(
+                Modifier
+                    .heightIn(max = 440.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                @Composable
+                fun menuItem(label: String, action: () -> Unit) {
+                    TextButton(onClick = action, modifier = Modifier.fillMaxWidth()) {
+                        Text(label, modifier = Modifier.fillMaxWidth(), color = theme.buttonTextColor)
+                    }
+                }
+                menuItem("后退", onBack)
+                menuItem("前进", onForward)
+                menuItem("刷新页面", onRefresh)
+                menuItem("主页", onHome)
+                menuItem("标签页", onTabs)
+                menuItem("书签", onBookmarks)
+                menuItem("历史记录", onHistory)
+                menuItem(if (uaMode == "desktop") "切换到手机模式" else "切换到桌面模式", onToggleUa)
+                menuItem(if (fullscreen) "退出全屏" else "全屏", onToggleFullscreen)
+                menuItem("资源嗅探", onSniffer)
+                menuItem("设置（3D 视角）", onSettings)
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭", color = theme.accentColor)
+            }
+        }
     )
 }
 

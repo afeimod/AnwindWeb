@@ -27,8 +27,6 @@ class BrowserTab(
     val id: String = UUID.randomUUID().toString(),
     initialUrl: String,
     var title: String = "新标签",
-    var canGoBack by mutableStateOf(false)
-    var canGoForward by mutableStateOf(false)
     /** 该标签独占的 WebView（由 [BrowserEngine] 创建，跨标签切换存活） */
     var webView: WebView? = null,
     /** 最近一次请求 WebView 加载的 URL（防止 update 块重复 loadUrl，跨重组存活） */
@@ -84,6 +82,9 @@ class BrowserTab(
      * 触发 update 块的 loadUrl。注意：委托属性必须在类体（构造参数
      * 不支持 by 委托）。
      */
+    var canGoBack by mutableStateOf(false)
+    var canGoForward by mutableStateOf(false)
+
     var url by mutableStateOf(initialUrl)
 
     /**

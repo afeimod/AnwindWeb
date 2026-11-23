@@ -8,7 +8,7 @@ on:
       buildType:
         description: '构建类型'
         required: true
-        default: 'both'
+        default: 'release'
         type: choice
         options:
           - debug

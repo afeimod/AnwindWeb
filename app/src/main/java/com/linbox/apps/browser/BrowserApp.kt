@@ -440,6 +440,8 @@ internal fun BrowserContent(scope: WindowContentScope) {
                     onToggleFullscreen = { toggleFullscreen(); showBrowserMenu = false },
                     onSniffer = { com.linbox.apps.browser.ResourceSnifferPanelBus.open(); showBrowserMenu = false },
                     onSettings = { showBrowserMenu = false; showView3dSettings = true },
+                    onPickBackground = { HomeBgManager.pick(); showBrowserMenu = false },
+                    onClearBackground = { HomeBgManager.clear(); showBrowserMenu = false },
                     onDismiss = { showBrowserMenu = false }
                 )
             }
@@ -846,8 +848,6 @@ private fun BrowserHomePage(onNavigate: (String) -> Unit) {
         Spacer(Modifier.height(12.dp))
         } // end Column（内容）
 
-        // ===== v1.2.0（用户需求 5）：背景管理按钮（右上角，浮在内容之上） =====
-        HomePageBgButtons(bgActive = onBg)
     } // end Box（主页根）
 }
 
@@ -960,7 +960,6 @@ private fun BrowserHomeLandscape(onNavigate: (String) -> Unit) {
             Spacer(Modifier.height(12.dp))
         } // end Column
 
-        HomePageBgButtons(bgActive = onBg)
     } // end Box
 }
 
@@ -1123,7 +1122,7 @@ private fun BrowserBottomBar(
     val theme = LocalWinTheme.current
     Surface(color = theme.windowTitleBarColor, tonalElevation = 3.dp) {
         Row(
-            modifier = Modifier.fillMaxWidth().height(56.dp).navigationBarsPadding(),
+            modifier = Modifier.fillMaxWidth().height(64.dp).navigationBarsPadding(),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -1153,12 +1152,12 @@ private fun BrowserBottomAction(
 ) {
     val theme = LocalWinTheme.current
     Column(
-        modifier = Modifier.width(56.dp).fillMaxHeight().clickable(enabled = enabled, onClick = onClick),
+        modifier = Modifier.width(64.dp).fillMaxHeight().clickable(enabled = enabled, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Icon(icon, contentDescription = label, tint = if (enabled) theme.buttonTextColor else theme.secondaryTextColor.copy(alpha = 0.4f), modifier = Modifier.size(22.dp))
-        Text(label, color = if (enabled) theme.buttonTextColor else theme.secondaryTextColor.copy(alpha = 0.4f), fontSize = 9.sp)
+        Icon(icon, contentDescription = label, tint = if (enabled) theme.buttonTextColor else theme.secondaryTextColor.copy(alpha = 0.4f), modifier = Modifier.size(30.dp))
+        Text(label, color = if (enabled) theme.buttonTextColor else theme.secondaryTextColor.copy(alpha = 0.4f), fontSize = 11.sp)
     }
 }
 
@@ -1212,9 +1211,26 @@ private fun BrowserMenuDialog(
     onToggleFullscreen: () -> Unit,
     onSniffer: () -> Unit,
     onSettings: () -> Unit,
+    onPickBackground: () -> Unit,
+    onClearBackground: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val theme = LocalWinTheme.current
+    val actions = listOf(
+        Triple("后退", Icons.AutoMirrored.Filled.ArrowBack, onBack),
+        Triple("前进", Icons.AutoMirrored.Filled.ArrowForward, onForward),
+        Triple("刷新页面", Icons.Default.Refresh, onRefresh),
+        Triple("主页", Icons.Default.Home, onHome),
+        Triple("标签页", Icons.Default.Tab, onTabs),
+        Triple("书签", Icons.Default.Bookmark, onBookmarks),
+        Triple("历史记录", Icons.Default.History, onHistory),
+        Triple(if (uaMode == "desktop") "手机模式" else "桌面模式", Icons.Default.Devices, onToggleUa),
+        Triple(if (fullscreen) "退出全屏" else "全屏", Icons.Default.Fullscreen, onToggleFullscreen),
+        Triple("资源嗅探", Icons.Default.WifiTethering, onSniffer),
+        Triple("3D 视角设置", Icons.Default.Settings, onSettings),
+        Triple("设置背景", Icons.Default.Wallpaper, onPickBackground),
+        Triple("恢复默认背景", Icons.Default.Image, onClearBackground)
+    )
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = theme.windowBackgroundColor,
@@ -1222,28 +1238,26 @@ private fun BrowserMenuDialog(
         textContentColor = theme.buttonTextColor,
         title = { Text("浏览器菜单") },
         text = {
-            Column(
-                Modifier
-                    .heightIn(max = 440.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                @Composable
-                fun menuItem(label: String, action: () -> Unit) {
-                    TextButton(onClick = action, modifier = Modifier.fillMaxWidth()) {
-                        Text(label, modifier = Modifier.fillMaxWidth(), color = theme.buttonTextColor)
+            Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState())) {
+                actions.chunked(3).forEach { rowActions ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        rowActions.forEach { (label, icon, action) ->
+                            Column(
+                                modifier = Modifier.weight(1f).padding(vertical = 5.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(theme.buttonBackgroundColor.copy(alpha = 0.55f))
+                                    .clickable(onClick = action).padding(vertical = 12.dp, horizontal = 4.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Icon(icon, contentDescription = label, tint = theme.buttonTextColor, modifier = Modifier.size(28.dp))
+                                Spacer(Modifier.height(7.dp))
+                                Text(label, color = theme.buttonTextColor, fontSize = 11.sp, maxLines = 2)
+                            }
+                        }
+                        repeat(3 - rowActions.size) { Spacer(Modifier.weight(1f)) }
                     }
                 }
-                menuItem("后退", onBack)
-                menuItem("前进", onForward)
-                menuItem("刷新页面", onRefresh)
-                menuItem("主页", onHome)
-                menuItem("标签页", onTabs)
-                menuItem("书签", onBookmarks)
-                menuItem("历史记录", onHistory)
-                menuItem(if (uaMode == "desktop") "切换到手机模式" else "切换到桌面模式", onToggleUa)
-                menuItem(if (fullscreen) "退出全屏" else "全屏", onToggleFullscreen)
-                menuItem("资源嗅探", onSniffer)
-                menuItem("设置（3D 视角）", onSettings)
             }
         },
         confirmButton = {

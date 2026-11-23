@@ -168,6 +168,8 @@ internal fun BrowserContent(scope: WindowContentScope) {
 
     var showBookmarks by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
+    var showTabSwitcher by remember { mutableStateOf(false) }
+    var showBrowserMenu by remember { mutableStateOf(false) }
 
     // 启动时打开初始标签（会话已存在标签时跳过 —— 最小化恢复不重开）
     LaunchedEffect(Unit) {
@@ -213,10 +215,12 @@ internal fun BrowserContent(scope: WindowContentScope) {
             .fillMaxSize()
             .background(winBg)
     ) {
+        val isLandscape = LocalConfiguration.current.orientation ==
+            android.content.res.Configuration.ORIENTATION_LANDSCAPE
         Column(modifier = Modifier.fillMaxSize().background(winBg)) {
 
-            // ===== 标签栏（真全屏时隐藏，F11 风格纯页面） =====
-            if (!isFullscreen) {
+            // ===== 标签栏（横屏保留桌面标签栏；竖屏由底部标签按钮管理） =====
+            if (!isFullscreen && isLandscape) {
                 TabBar(
                     tabs = tabManager.tabs,
                     activeTabId = tabManager.activeTabId,
@@ -388,6 +392,42 @@ internal fun BrowserContent(scope: WindowContentScope) {
                         }
                     }
                 }
+            }
+
+            // ===== 竖屏浏览器底部导航 =====
+            if (!isFullscreen && !isLandscape) {
+                BrowserBottomBar(
+                    canGoBack = tabManager.getTab(tabManager.activeTabId)?.canGoBack == true,
+                    canGoForward = tabManager.getTab(tabManager.activeTabId)?.canGoForward == true,
+                    tabCount = tabManager.tabs.size,
+                    onBack = { tabManager.getTab(tabManager.activeTabId)?.goBack() },
+                    onForward = { tabManager.getTab(tabManager.activeTabId)?.goForward() },
+                    onTabs = { showTabSwitcher = true },
+                    onMenu = { showBrowserMenu = true },
+                    onHome = {
+                        tabManager.getTab(tabManager.activeTabId)?.loadUrl(defaultHome)
+                        tabManager.addressInput = if (defaultHome == "linbox://home") "" else defaultHome
+                    }
+                )
+            }
+
+            if (showTabSwitcher) {
+                TabSwitcherDialog(
+                    tabs = tabManager.tabs,
+                    activeTabId = tabManager.activeTabId,
+                    onSelect = { id -> tabManager.switchTo(id); showTabSwitcher = false },
+                    onCloseTab = { id -> tabManager.closeTab(id) },
+                    onNewTab = { tabManager.openTab("linbox://home"); showTabSwitcher = false },
+                    onDismiss = { showTabSwitcher = false }
+                )
+            }
+            if (showBrowserMenu) {
+                BrowserMenuDialog(
+                    onBookmarks = { showBrowserMenu = false; showBookmarks = true },
+                    onHistory = { showBrowserMenu = false; showHistory = true },
+                    onRefresh = { tabManager.getTab(tabManager.activeTabId)?.refresh(); showBrowserMenu = false },
+                    onDismiss = { showBrowserMenu = false }
+                )
             }
 
             // ===== 书签/历史侧边面板 =====
@@ -1053,6 +1093,115 @@ private fun QuickLinkItem(
             maxLines = 1
         )
     }
+}
+
+@Composable
+private fun BrowserBottomBar(
+    canGoBack: Boolean,
+    canGoForward: Boolean,
+    tabCount: Int,
+    onBack: () -> Unit,
+    onForward: () -> Unit,
+    onTabs: () -> Unit,
+    onMenu: () -> Unit,
+    onHome: () -> Unit
+) {
+    val theme = LocalWinTheme.current
+    Surface(color = theme.windowTitleBarColor, tonalElevation = 3.dp) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(56.dp).navigationBarsPadding(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BrowserBottomAction(Icons.AutoMirrored.Filled.ArrowBack, "后退", canGoBack, onBack)
+            BrowserBottomAction(Icons.AutoMirrored.Filled.ArrowForward, "前进", canGoForward, onForward)
+            Box(contentAlignment = Alignment.Center) {
+                BrowserBottomAction(Icons.Default.Tab, "标签", true, onTabs)
+                Text(
+                    text = tabCount.toString(),
+                    color = theme.buttonTextColor,
+                    fontSize = 9.sp,
+                    modifier = Modifier.align(Alignment.Center).offset(y = 1.dp).clickable(onClick = onTabs)
+                )
+            }
+            BrowserBottomAction(Icons.Default.Menu, "菜单", true, onMenu)
+            BrowserBottomAction(Icons.Default.Home, "主页", true, onHome)
+        }
+    }
+}
+
+@Composable
+private fun BrowserBottomAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val theme = LocalWinTheme.current
+    Column(
+        modifier = Modifier.width(56.dp).fillMaxHeight().clickable(enabled = enabled, onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(icon, contentDescription = label, tint = if (enabled) theme.buttonTextColor else theme.secondaryTextColor.copy(alpha = 0.4f), modifier = Modifier.size(22.dp))
+        Text(label, color = if (enabled) theme.buttonTextColor else theme.secondaryTextColor.copy(alpha = 0.4f), fontSize = 9.sp)
+    }
+}
+
+@Composable
+private fun TabSwitcherDialog(
+    tabs: List<BrowserTab>,
+    activeTabId: String?,
+    onSelect: (String) -> Unit,
+    onCloseTab: (String) -> Unit,
+    onNewTab: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val theme = LocalWinTheme.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("标签页 (${tabs.size})") },
+        text = {
+            Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                tabs.forEach { tab ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = tab.title.take(32),
+                            color = if (tab.id == activeTabId) theme.accentColor else theme.buttonTextColor,
+                            modifier = Modifier.weight(1f).clickable { onSelect(tab.id) }.padding(vertical = 12.dp),
+                            maxLines = 1
+                        )
+                        IconButton(onClick = { onCloseTab(tab.id) }) {
+                            Icon(Icons.Default.Close, contentDescription = "关闭标签")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onNewTab) { Text("新建标签") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("完成") } }
+    )
+}
+
+@Composable
+private fun BrowserMenuDialog(
+    onBookmarks: () -> Unit,
+    onHistory: () -> Unit,
+    onRefresh: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("浏览器菜单") },
+        text = {
+            Column {
+                TextButton(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) { Text("刷新页面") }
+                TextButton(onClick = onBookmarks, modifier = Modifier.fillMaxWidth()) { Text("书签") }
+                TextButton(onClick = onHistory, modifier = Modifier.fillMaxWidth()) { Text("历史记录") }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
 }
 
 /**

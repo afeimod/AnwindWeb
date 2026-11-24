@@ -414,7 +414,7 @@ internal fun BrowserContent(scope: WindowContentScope) {
                     onTabs = { showBrowserMenu = false; showTabSwitcher = true },
                     onBookmarks = { showBrowserMenu = false; showBookmarks = true },
                     onBookmarkCurrent = { toggleCurrentBookmark(); showBrowserMenu = false },
-                    onHistory = { showBrowserMenu = false; showHistory = true }
+                    onHistory = { showBrowserMenu = false; showHistory = true },
                     onToggleUa = { toggleUaMode(); showBrowserMenu = false },
                     onToggleFullscreen = { toggleFullscreen(); showBrowserMenu = false },
                     onSniffer = { com.linbox.apps.browser.ResourceSnifferPanelBus.open(); showBrowserMenu = false },

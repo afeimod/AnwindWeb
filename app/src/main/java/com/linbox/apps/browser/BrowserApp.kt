@@ -397,10 +397,20 @@ internal fun BrowserContent(scope: WindowContentScope) {
             // ===== 竖屏浏览器底部导航 =====
             if (!isFullscreen && !isLandscape) {
                 BrowserBottomBar(
-                    canGoBack = tabManager.getTab(tabManager.activeTabId)?.canGoBack == true,
+                    canGoBack = tabManager.getTab(tabManager.activeTabId)?.let {
+                        it.url.isNotEmpty() && it.url != "linbox://home"
+                    } == true,
                     canGoForward = tabManager.getTab(tabManager.activeTabId)?.canGoForward == true,
                     tabCount = tabManager.tabs.size,
-                    onBack = { tabManager.getTab(tabManager.activeTabId)?.goBack() },
+                    onBack = {
+                        tabManager.getTab(tabManager.activeTabId)?.let { tab ->
+                            if (tab.webView?.canGoBack() == true) tab.goBack()
+                            else {
+                                tab.loadUrl("linbox://home")
+                                tabManager.addressInput = ""
+                            }
+                        }
+                    },
                     onForward = { tabManager.getTab(tabManager.activeTabId)?.goForward() },
                     onTabs = { showTabSwitcher = true },
                     onMenu = { showBrowserMenu = true },
@@ -1173,20 +1183,52 @@ private fun TabSwitcherDialog(
     val theme = LocalWinTheme.current
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = theme.windowBackgroundColor,
+        titleContentColor = theme.buttonTextColor,
+        textContentColor = theme.buttonTextColor,
         title = { Text("标签页 (${tabs.size})") },
         text = {
             Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
-                tabs.forEach { tab ->
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = tab.title.take(32),
-                            color = if (tab.id == activeTabId) theme.accentColor else theme.buttonTextColor,
-                            modifier = Modifier.weight(1f).clickable { onSelect(tab.id) }.padding(vertical = 12.dp),
-                            maxLines = 1
-                        )
-                        IconButton(onClick = { onCloseTab(tab.id) }) {
-                            Icon(Icons.Default.Close, contentDescription = "关闭标签")
+                tabs.chunked(2).forEach { rowTabs ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        rowTabs.forEach { tab ->
+                            Column(
+                                modifier = Modifier.weight(1f).padding(vertical = 5.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(
+                                        if (tab.id == activeTabId) theme.accentColor.copy(alpha = 0.18f)
+                                        else theme.buttonBackgroundColor
+                                    )
+                                    .border(
+                                        width = if (tab.id == activeTabId) 1.dp else 0.dp,
+                                        color = if (tab.id == activeTabId) theme.accentColor else Color.Transparent,
+                                        shape = RoundedCornerShape(14.dp)
+                                    )
+                                    .clickable { onSelect(tab.id) }
+                                    .padding(10.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                                    IconButton(onClick = { onCloseTab(tab.id) }, modifier = Modifier.size(28.dp)) {
+                                        Icon(Icons.Default.Close, contentDescription = "关闭标签", tint = theme.secondaryTextColor)
+                                    }
+                                }
+                                Icon(
+                                    Icons.Default.Language,
+                                    contentDescription = null,
+                                    tint = if (tab.id == activeTabId) theme.accentColor else theme.buttonTextColor,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    text = tab.title.take(32),
+                                    color = if (tab.id == activeTabId) theme.accentColor else theme.buttonTextColor,
+                                    maxLines = 2,
+                                    fontSize = 12.sp
+                                )
+                            }
                         }
+                        if (rowTabs.size == 1) Spacer(Modifier.weight(1f))
                     }
                 }
             }

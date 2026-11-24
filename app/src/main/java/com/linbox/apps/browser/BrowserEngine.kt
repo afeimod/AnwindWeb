@@ -138,7 +138,15 @@ object BrowserEngine {
     private const val TAG_DESTROYED = "linbox_webview_destroyed"
 
     fun desiredUa(uaMode: String): String =
-        if (uaMode == "desktop") DESKTOP_UA else (defaultMobileUa ?: DESKTOP_UA)
+        if (uaMode == "desktop") desktopUserAgent() else (defaultMobileUa ?: DESKTOP_UA)
+
+    private fun desktopUserAgent(): String {
+        val chromeVersion = defaultMobileUa
+            ?.let { Regex("Chrome/([0-9.]+)").find(it)?.groupValues?.getOrNull(1) }
+            ?.takeIf { it.isNotBlank() }
+            ?: DESKTOP_UA.substringAfter("Chrome/").substringBefore(' ')
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Safari/537.36"
+    }
 
     /**
      * 获取（必要时创建）标签专属 WebView。
@@ -564,6 +572,9 @@ object BrowserEngine {
 
             // ===== v2.14.2（gamehtml）页面级注入：在页面自身 JS 之前执行 =====
             if (url != null && (url.startsWith("http") || url.startsWith("file:"))) {
+                if (manager.uaMode == "desktop") {
+                    view?.evaluateJavascript(DESKTOP_MODE_SCRIPT, null)
+                }
                 // 0) v2.14.4 WebGL 像素管线守卫：检测到坏上下文时让 webgl
                 //    getContext 返回 null，Ruffle/HTML5 游戏自动回退 canvas2d
                 view?.evaluateJavascript(WEBGL_GUARD_SCRIPT, null)
@@ -620,6 +631,9 @@ object BrowserEngine {
                 tab.canGoBack = it.canGoBack()
                 tab.canGoForward = it.canGoForward()
                 if (url?.startsWith("http") == true || url?.startsWith("file:") == true) {
+                    if (manager.uaMode == "desktop") {
+                        it.evaluateJavascript(DESKTOP_MODE_SCRIPT, null)
+                    }
                     it.evaluateJavascript(FLASH_DOM_DETECT_SCRIPT, null)
                     it.evaluateJavascript(MEDIA_CONTEXT_MENU_SCRIPT, null)
                 }
@@ -1062,7 +1076,7 @@ object BrowserEngine {
                             }
                         }
                         if (request?.requestHeaders?.none { it.key.equals("User-Agent", true) } != false) {
-                            conn.setRequestProperty("User-Agent", DESKTOP_UA)
+                            conn.setRequestProperty("User-Agent", desktopUserAgent())
                         }
                         conn.setRequestProperty("Accept", "*/*")
                         // 不请求 gzip，避免手动解压
@@ -1239,6 +1253,36 @@ object BrowserEngine {
                         }
                       }
                     });
+                  }
+                })();
+            """
+
+            private const val DESKTOP_MODE_SCRIPT = """
+                (function(){
+                  var firstInstall=!window.__linboxDesktopMode;
+                  window.__linboxDesktopMode=true;
+                  function setProperty(target,name,value){
+                    try{Object.defineProperty(target,name,{get:function(){return value;},configurable:true});}catch(e){}
+                  }
+                  setProperty(navigator,'platform','Win32');
+                  setProperty(navigator,'maxTouchPoints',0);
+                  setProperty(screen,'width',1280);
+                  setProperty(screen,'availWidth',1280);
+                  function applyViewport(){
+                    try{
+                      var head=document.head||document.documentElement;
+                      if(!head)return;
+                      var meta=document.querySelector('meta[name="viewport"]');
+                      if(!meta){meta=document.createElement('meta');meta.name='viewport';head.appendChild(meta);}
+                      var parts=(meta.content||'').split(',').map(function(part){return part.trim();}).filter(function(part){return part&&!/^width\s*=/i.test(part);});
+                      parts.unshift('width=1280');
+                      var next=parts.join(', ');
+                      if(meta.content!==next)meta.content=next;
+                    }catch(e){}
+                  }
+                  applyViewport();
+                  if(firstInstall&&window.MutationObserver){
+                    try{new MutationObserver(applyViewport).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['content','name']});}catch(e){}
                   }
                 })();
             """

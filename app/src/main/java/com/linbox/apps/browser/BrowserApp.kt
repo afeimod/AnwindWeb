@@ -1078,6 +1078,23 @@ private fun BrowserHomeQuickLinks(
 
     if (showAddDialog) {
         val theme = LocalWinTheme.current
+        val fieldTextColor = if (theme.isDark) Color.White else Color(0xFF111827)
+        val fieldHintColor = if (theme.isDark) Color(0xFFB8C2D1) else Color(0xFF4B5563)
+        val fieldContainerColor = if (theme.isDark) theme.windowBackgroundColor else Color.White
+        val fieldColors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = fieldTextColor,
+            unfocusedTextColor = fieldTextColor,
+            disabledTextColor = fieldHintColor,
+            focusedContainerColor = fieldContainerColor,
+            unfocusedContainerColor = fieldContainerColor,
+            disabledContainerColor = fieldContainerColor,
+            cursorColor = theme.accentColor,
+            focusedBorderColor = theme.accentColor,
+            unfocusedBorderColor = fieldHintColor,
+            focusedLabelColor = theme.accentColor,
+            unfocusedLabelColor = fieldHintColor,
+            disabledLabelColor = fieldHintColor
+        )
         AlertDialog(
             onDismissRequest = { showAddDialog = false },
             containerColor = theme.windowBackgroundColor,
@@ -1086,9 +1103,27 @@ private fun BrowserHomeQuickLinks(
             title = { Text("添加自定义网站") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = newName, onValueChange = { newName = it }, label = { Text("名称") }, singleLine = true)
-                    OutlinedTextField(value = newUrl, onValueChange = { newUrl = it }, label = { Text("网址") }, singleLine = true)
-                    OutlinedTextField(value = newIcon, onValueChange = { newIcon = it.take(8) }, label = { Text("图标（emoji 或符号）") }, singleLine = true)
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = { newName = it },
+                        label = { Text("名称") },
+                        singleLine = true,
+                        colors = fieldColors
+                    )
+                    OutlinedTextField(
+                        value = newUrl,
+                        onValueChange = { newUrl = it },
+                        label = { Text("网址") },
+                        singleLine = true,
+                        colors = fieldColors
+                    )
+                    OutlinedTextField(
+                        value = newIcon,
+                        onValueChange = { newIcon = it.take(8) },
+                        label = { Text("图标（emoji 或符号）") },
+                        singleLine = true,
+                        colors = fieldColors
+                    )
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         if (newIconPath.isNotBlank()) {
                             val bitmap = remember(newIconPath) { decodeSiteIcon(newIconPath) }

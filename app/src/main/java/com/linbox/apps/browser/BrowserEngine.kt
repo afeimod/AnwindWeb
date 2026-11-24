@@ -300,7 +300,7 @@ object BrowserEngine {
             val kind = when (hit.type) {
                 HitTestResult.ANCHOR_TYPE, HitTestResult.SRC_ANCHOR_TYPE -> "link"
                 HitTestResult.IMAGE_TYPE, HitTestResult.SRC_IMAGE_ANCHOR_TYPE -> "image"
-                else -> "probe"
+                else -> return@setOnLongClickListener false
             }
             val exposed = webView as? ExposedWebView
             val scale = webView.scale.takeIf { it > 0f } ?: 1f
@@ -323,8 +323,57 @@ object BrowserEngine {
                   }
                   var object=el.closest&&el.closest('object,embed');
                   var data={kind:'$kind',url:$fallbackUrl,linkUrl:link?link.href:'',linkText:link?(link.innerText||link.textContent||'').trim():''};
-                  if(image){data.kind='image';data.url=image.currentSrc||image.src||data.url;}
-                  else if(video){data.kind='video';data.url=video.currentSrc||video.src||data.url;}
+                  function absolute(value){try{return value?new URL(value,document.baseURI).href:'';}catch(e){return '';}}
+                  function mimeFrom(value){
+                    var path=(value||'').split(/[?#]/)[0];
+                    try{var u=new URL(value,document.baseURI);var name=u.searchParams.get('filename')||u.searchParams.get('file')||u.searchParams.get('name');if(name&&name.indexOf('.')>=0)path=name;}catch(e){}
+                    var ext=path.split('.').pop().toLowerCase();
+                    var types={jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp',avif:'image/avif',bmp:'image/bmp',svg:'image/svg+xml',mp4:'video/mp4',m4v:'video/mp4',webm:'video/webm',mov:'video/quicktime',m3u8:'application/vnd.apple.mpegurl'};
+                    return types[ext]||'';
+                  }
+                  function largestSrcset(value){
+                    if(!value)return '';
+                    var best='',bestSize=-1;
+                    value.split(',').forEach(function(entry){
+                      var parts=entry.trim().split(/\s+/);if(!parts[0])return;
+                      var match=(parts[1]||'1x').match(/^([0-9.]+)(w|x)$/i);
+                      var size=match?parseFloat(match[1]):-1;
+                      if(size>bestSize){bestSize=size;best=parts[0];}
+                    });
+                    return absolute(best);
+                  }
+                  if(image){
+                    data.kind='image';
+                    var original=image.getAttribute('data-original')||image.getAttribute('data-original-src')||image.getAttribute('data-src-original')||image.getAttribute('data-full')||image.getAttribute('data-zoom-image')||image.getAttribute('data-hi-res-src')||image.getAttribute('data-large')||image.getAttribute('data-big');
+                    var picture=image.closest('picture');
+                    var sources=picture?picture.querySelectorAll('source[srcset],source[data-srcset]'):[];
+                    var sourceSet='';
+                    for(var s=0;s<sources.length;s++)sourceSet=largestSrcset(sources[s].getAttribute('data-srcset')||sources[s].getAttribute('srcset'))||sourceSet;
+                    var imageSet=largestSrcset(image.getAttribute('data-srcset')||image.getAttribute('srcset'));
+                    var linkedImage=link&&link.href!==location.href?link.href:'';
+                    var linkedPath=linkedImage.split(/[?#]/)[0].toLowerCase();
+                    var linkedExt=(linkedPath.match(/\.(jpe?g|png|gif|webp|avif|bmp|svg)$/i)||[])[1];
+                    var linkedName='';try{var linkedUrl=new URL(linkedImage,document.baseURI);linkedName=linkedUrl.searchParams.get('filename')||linkedUrl.searchParams.get('file')||linkedUrl.searchParams.get('name')||'';}catch(e){}
+                    var linkedOriginal=!!linkedExt||/\.(jpe?g|png|gif|webp|avif|bmp|svg)$/i.test(linkedName);
+                    data.linkUrl=linkedOriginal?absolute(linkedImage):'';
+                    data.url=absolute(original)||(linkedOriginal?absolute(linkedImage):'')||sourceSet||imageSet||absolute(image.getAttribute('data-src'))||absolute(image.getAttribute('data-lazy-src'))||absolute(image.src)||absolute(image.currentSrc)||data.url;
+                    data.mimeType=image.getAttribute('type')||image.getAttribute('data-mime-type')||mimeFrom(data.url);
+                  }
+                  else if(video){
+                    data.kind='video';
+                    var videoSources=video.querySelectorAll('source');
+                    var bestVideo='',bestQuality=-1,bestMime='';
+                    for(var v=0;v<videoSources.length;v++){
+                      var candidate=videoSources[v];
+                      var candidateUrl=candidate.getAttribute('data-original')||candidate.getAttribute('data-src')||candidate.src||'';
+                      var quality=parseInt(candidate.getAttribute('data-quality')||candidate.getAttribute('data-res')||candidate.getAttribute('label')||'')||0;
+                      var resolution=(candidateUrl.match(/(2160|1440|1080|720|480|360)p/i)||[])[1];
+                      quality=Math.max(quality,parseInt(resolution||'0'));
+                      if(candidateUrl&&quality>=bestQuality){bestQuality=quality;bestVideo=candidateUrl;bestMime=candidate.type||'';}
+                    }
+                    data.url=absolute(video.getAttribute('data-original')||video.getAttribute('data-src')||video.getAttribute('data-full')||video.getAttribute('src'))||absolute(bestVideo)||absolute(video.currentSrc)||data.url;
+                    data.mimeType=bestMime||video.getAttribute('type')||mimeFrom(data.url);
+                  }
                   else if(object){data.kind='flash';data.url=object.data||object.src||data.url;}
                   else if(link){data.kind='link';data.url=link.href;}
                   return JSON.stringify(data);
@@ -338,14 +387,13 @@ object BrowserEngine {
                         kind = json.optString("kind", kind),
                         url = json.optString("url", hit.extra ?: ""),
                         linkUrl = json.optString("linkUrl"),
-                        linkText = json.optString("linkText")
+                        linkText = json.optString("linkText"),
+                        mimeType = json.optString("mimeType")
                     )
-                    if (target.kind != "probe" && target.url.isNotBlank()) {
-                        manager.ui?.onLongPress(target)
-                    }
+                    if (target.url.isNotBlank()) manager.ui?.onLongPress(target)
                 }
             }
-            kind != "probe"
+            true
         }
 
         // v6.10：blob: 下载落盘桥（页面 JS 经 XHR 读 blob 后分块回调）
@@ -353,6 +401,7 @@ object BrowserEngine {
             wv.addJavascriptInterface(
                 BrowserDownloads.bridge(wv), "__linboxDownload"
             )
+            wv.addJavascriptInterface(MediaContextMenuBridge(manager), "__linboxMediaMenu")
         }
 
         wv.webViewClient = TabWebViewClient(ctx, tab, manager)
@@ -572,6 +621,7 @@ object BrowserEngine {
                 tab.canGoForward = it.canGoForward()
                 if (url?.startsWith("http") == true || url?.startsWith("file:") == true) {
                     it.evaluateJavascript(FLASH_DOM_DETECT_SCRIPT, null)
+                    it.evaluateJavascript(MEDIA_CONTEXT_MENU_SCRIPT, null)
                 }
             }
 
@@ -1404,6 +1454,77 @@ object BrowserEngine {
                 })();
             """
 
+            private const val MEDIA_CONTEXT_MENU_SCRIPT = """
+                (function(){
+                  if(window.__linboxMediaContextInstalled)return;
+                  window.__linboxMediaContextInstalled=true;
+                  function absolute(value){try{return value?new URL(value,document.baseURI).href:'';}catch(e){return '';}}
+                  function mimeFrom(value){
+                    var dataMime=(value||'').match(/^data:([^;,]+)/i);if(dataMime)return dataMime[1].toLowerCase();
+                    var path=(value||'').split(/[?#]/)[0];
+                    try{var u=new URL(value,document.baseURI);var name=u.searchParams.get('filename')||u.searchParams.get('file')||u.searchParams.get('name');if(name&&name.indexOf('.')>=0)path=name;}catch(e){}
+                    var ext=path.split('.').pop().toLowerCase();
+                    var types={jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp',avif:'image/avif',bmp:'image/bmp',svg:'image/svg+xml',mp4:'video/mp4',m4v:'video/mp4',webm:'video/webm',mov:'video/quicktime',m3u8:'application/vnd.apple.mpegurl'};
+                    return types[ext]||'';
+                  }
+                  function largestSrcset(value){
+                    if(!value)return '';
+                    var best='',bestSize=-1;
+                    value.split(',').forEach(function(entry){
+                      var parts=entry.trim().split(/\s+/);
+                      var match=(parts[1]||'1x').match(/^([0-9.]+)(w|x)$/i);
+                      var size=match?parseFloat(match[1]):-1;
+                      if(parts[0]&&size>bestSize){bestSize=size;best=parts[0];}
+                    });
+                    return absolute(best);
+                  }
+                  document.addEventListener('contextmenu',function(event){
+                    var el=event.target;
+                    var image=el.closest&&el.closest('img');
+                    var video=el.closest&&el.closest('video');
+                    if(!video){
+                      var videos=document.querySelectorAll('video');
+                      for(var i=0;i<videos.length;i++){
+                        var rect=videos[i].getBoundingClientRect();
+                        if(event.clientX>=rect.left&&event.clientX<=rect.right&&event.clientY>=rect.top&&event.clientY<=rect.bottom){video=videos[i];break;}
+                      }
+                    }
+                    if(!image&&!video)return;
+                    event.preventDefault();event.stopImmediatePropagation();
+                    var target={kind:'image',url:'',linkUrl:'',mimeType:''};
+                    if(image){
+                      var link=image.closest('a[href]');
+                      var original=image.getAttribute('data-original')||image.getAttribute('data-original-src')||image.getAttribute('data-src-original')||image.getAttribute('data-full')||image.getAttribute('data-zoom-image')||image.getAttribute('data-hi-res-src')||image.getAttribute('data-large')||image.getAttribute('data-big');
+                      var picture=image.closest('picture');
+                      var sources=picture?picture.querySelectorAll('source[srcset],source[data-srcset]'):[];
+                      var source='';for(var s=0;s<sources.length;s++)source=largestSrcset(sources[s].getAttribute('data-srcset')||sources[s].getAttribute('srcset'))||source;
+                      var linkUrl=link&&link.href!==location.href?link.href:'';
+                      var linkPath=linkUrl.split(/[?#]/)[0];
+                      var linkName='';try{var linkParsed=new URL(linkUrl,document.baseURI);linkName=linkParsed.searchParams.get('filename')||linkParsed.searchParams.get('file')||linkParsed.searchParams.get('name')||'';}catch(e){}
+                      var linkedOriginal=/\.(jpe?g|png|gif|webp|avif|bmp|svg)$/i.test(linkPath)||/\.(jpe?g|png|gif|webp|avif|bmp|svg)$/i.test(linkName);
+                      target.url=absolute(original)||(linkedOriginal?absolute(linkUrl):'')||source||largestSrcset(image.getAttribute('data-srcset')||image.getAttribute('srcset'))||absolute(image.getAttribute('data-src'))||absolute(image.getAttribute('data-lazy-src'))||absolute(image.src)||absolute(image.currentSrc);
+                      target.linkUrl=linkedOriginal?absolute(linkUrl):'';
+                      target.mimeType=image.getAttribute('type')||image.getAttribute('data-mime-type')||mimeFrom(target.url);
+                    }else{
+                      target.kind='video';
+                      var sources=video.querySelectorAll('source');
+                      var best='',quality=-1;
+                      for(var v=0;v<sources.length;v++){
+                        var candidate=sources[v];
+                        var candidateUrl=candidate.getAttribute('data-original')||candidate.getAttribute('data-src')||candidate.src||'';
+                        var q=parseInt(candidate.getAttribute('data-quality')||candidate.getAttribute('data-res')||candidate.getAttribute('label')||'')||0;
+                        var res=(candidateUrl.match(/(2160|1440|1080|720|480|360)p/i)||[])[1];
+                        q=Math.max(q,parseInt(res||'0'));
+                        if(candidateUrl&&q>=quality){quality=q;best=candidateUrl;target.mimeType=candidate.type||'';}
+                      }
+                      target.url=absolute(video.getAttribute('data-original')||video.getAttribute('data-full'))||absolute(best)||absolute(video.getAttribute('data-src')||video.getAttribute('src'))||absolute(video.currentSrc);
+                      target.mimeType=target.mimeType||video.getAttribute('type')||mimeFrom(target.url);
+                    }
+                    if(target.url&&window.__linboxMediaMenu)window.__linboxMediaMenu.show(JSON.stringify(target));
+                  },true);
+                })();
+            """
+
             /**
              * Flash 元素懒加载探测器（LinBox 按 gamehtml 思路实现，v2.14.4
              * 接入链式加载器）：
@@ -1722,6 +1843,27 @@ object BrowserEngine {
  * 文件名三级回退：RFC 6266 filename*（RFC 5987 百分号编码，中文站常用）→
  * filename="…" → URL 末段 → 时间戳；统一清洗非法字符 + 按 MIME 补扩展名。
  */
+internal class MediaContextMenuBridge(private val manager: TabManager) {
+    @JavascriptInterface
+    fun show(value: String?) {
+        runCatching {
+            val json = JSONObject(value ?: return)
+            val target = BrowserLongPressTarget(
+                kind = json.optString("kind"),
+                url = json.optString("url"),
+                linkUrl = json.optString("linkUrl"),
+                linkText = json.optString("linkText"),
+                mimeType = json.optString("mimeType")
+            )
+            val scheme = Uri.parse(target.url).scheme?.lowercase()
+            if (target.kind !in setOf("image", "video") || scheme !in setOf("http", "https", "blob", "data")) return
+            Handler(Looper.getMainLooper()).post {
+                if (target.url.isNotBlank()) manager.ui?.onLongPress(target)
+            }
+        }
+    }
+}
+
 internal object BrowserDownloads {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -1735,10 +1877,12 @@ internal object BrowserDownloads {
         userAgent: String?,
         contentDisposition: String?,
         mimetype: String?,
-        contentLength: Long = -1L
+        contentLength: Long = -1L,
+        fallbackUrl: String? = null
     ) {
         val ctx = wv.context.applicationContext
-        val filename = parseFilename(contentDisposition, url, mimetype)
+        val downloadUrl = fallbackUrl?.takeIf { it.isNotBlank() } ?: url
+        val filename = parseFilename(contentDisposition, downloadUrl, mimetype)
         when {
             url.startsWith("blob:", ignoreCase = true) -> {
                 // blob: URL 属页面渲染进程私有，DownloadManager 取不到 ——
@@ -1771,14 +1915,14 @@ internal object BrowserDownloads {
                 // http/https：先弹重命名确认，确认后才入队 DownloadManager；
                 // Cookie/Referer/UA 在此快照（确认时页面可能已导航）
                 runCatching {
-                    val cookie = CookieManager.getInstance().getCookie(url)
+                    val cookie = CookieManager.getInstance().getCookie(downloadUrl)
                     val referer = wv.url?.takeIf { it.startsWith("http") }
                     DownloadPromptBus.prompt(
                         DownloadRequest.Http(
                             suggestedName = filename,
                             mime = mimetype,
                             contentLength = contentLength,
-                            url = url,
+                            url = downloadUrl,
                             userAgent = userAgent,
                             cookie = cookie,
                             referer = referer
@@ -1844,14 +1988,41 @@ internal object BrowserDownloads {
         name.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_")
             .trim().trim('.').take(120)
 
+    fun mimeForUrl(url: String): String? {
+        val extension = runCatching { Uri.parse(url).lastPathSegment?.substringAfterLast('.', "") }
+            .getOrNull()?.lowercase()?.takeIf { it.matches(Regex("[a-z0-9]{1,8}")) }
+            ?: return null
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+            ?: when (extension) {
+                "m3u8" -> "application/vnd.apple.mpegurl"
+                "ts" -> "video/mp2t"
+                else -> null
+            }
+    }
+
+    fun ensureExtension(filename: String, mime: String?, contentDisposition: String?, url: String): String {
+        val serverFilename = contentDisposition?.let { parseFilename(it, url, mime) }
+        val serverExtension = serverFilename?.let { name ->
+            name.substringAfterLast('.', "").takeIf { it.isNotBlank() && name.endsWith(".$it") }
+        }
+        val expected = extFor(mime ?: mimeForUrl(url))
+            .ifBlank { serverExtension?.let { ".$it" }.orEmpty() }
+        if (expected.isBlank()) return filename
+        val current = filename.substringAfterLast('.', "").lowercase()
+        if (current.isBlank()) return filename + expected
+        if (current != expected.removePrefix(".")) return filename.substringBeforeLast('.') + expected
+        return filename
+    }
+
     /** MIME → 扩展名（MimeTypeMap 优先，常见类型兜底）。 */
     private fun extFor(mimetype: String?): String {
         mimetype ?: return ""
+        val normalizedMime = mimetype.substringBefore(';').trim().lowercase()
         val mapped = runCatching {
-            MimeTypeMap.getSingleton().getExtensionFromMimeType(mimetype)
+            MimeTypeMap.getSingleton().getExtensionFromMimeType(normalizedMime)
         }.getOrNull()
         if (!mapped.isNullOrBlank()) return ".$mapped"
-        return when (mimetype.lowercase()) {
+        return when (normalizedMime) {
             "application/vnd.android.package-archive" -> ".apk"
             "application/zip", "application/x-zip-compressed" -> ".zip"
             "application/x-rar-compressed", "application/vnd.rar" -> ".rar"
@@ -1861,11 +2032,17 @@ internal object BrowserDownloads {
             "text/html" -> ".html"
             "text/plain" -> ".txt"
             "image/jpeg" -> ".jpg"
+            "image/avif" -> ".avif"
+            "image/bmp" -> ".bmp"
+            "image/svg+xml" -> ".svg"
             "image/png" -> ".png"
             "image/gif" -> ".gif"
             "image/webp" -> ".webp"
             "audio/mpeg" -> ".mp3"
             "video/mp4" -> ".mp4"
+            "video/webm" -> ".webm"
+            "video/quicktime" -> ".mov"
+            "application/vnd.apple.mpegurl", "application/x-mpegurl" -> ".m3u8"
             "application/x-msdownload", "application/x-msdos-program" -> ".exe"
             else -> ""
         }
@@ -1888,7 +2065,20 @@ internal object BrowserDownloads {
             val clean = sanitize(maybeDecode(plain))
             if (clean.isNotEmpty()) return withExt(clean, mimetype)
         }
-        // 3) URL 末段（去掉查询串）
+        // 3) URL 中显式提供的文件名（媒体 CDN 常把扩展名放在查询参数中）
+        if (url.startsWith("http", ignoreCase = true)) {
+            runCatching {
+                val uri = Uri.parse(url)
+                val queryName = sequenceOf("filename", "file", "name", "download")
+                    .mapNotNull { uri.getQueryParameter(it) }
+                    .firstOrNull { it.isNotBlank() }
+                if (queryName != null) {
+                    val clean = sanitize(maybeDecode(queryName.substringAfterLast('/')))
+                    if (clean.isNotEmpty()) return withExt(clean, mimetype)
+                }
+            }
+        }
+        // 4) URL 末段（去掉查询串）
         if (url.startsWith("http", ignoreCase = true)) {
             runCatching {
                 val seg = Uri.parse(url).lastPathSegment
@@ -1898,15 +2088,13 @@ internal object BrowserDownloads {
                 }
             }
         }
-        // 4) 时间戳回退
+        // 5) 时间戳回退
         return "linbox_${System.currentTimeMillis()}${extFor(mimetype)}"
     }
 
     /** 缺扩展名时按 MIME 补全。 */
     private fun withExt(name: String, mimetype: String?): String {
-        if (!mimetype.isNullOrBlank() &&
-            !name.substringAfterLast('.', "").matches(Regex("[A-Za-z0-9]{1,5}"))
-        ) {
+        if (!mimetype.isNullOrBlank() && !name.substringAfterLast('/', name).contains('.')) {
             return name + extFor(mimetype)
         }
         return name

@@ -104,7 +104,8 @@ data class BrowserLongPressTarget(
     val kind: String,
     val url: String,
     val linkUrl: String = "",
-    val linkText: String = ""
+    val linkText: String = "",
+    val mimeType: String = ""
 )
 
 interface TabUiCallbacks {

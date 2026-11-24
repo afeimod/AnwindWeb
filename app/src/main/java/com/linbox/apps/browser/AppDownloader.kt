@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.webkit.CookieManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
 import com.linbox.LinBoxApp
@@ -95,6 +96,7 @@ object AppDownloader {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         var lastNotify = 0L
+        var connection: HttpURLConnection? = null
         fun notifyProgress(done: Long, total: Long) {
             val now = System.currentTimeMillis()
             if (now - lastNotify < 400 && !(done >= total && total > 0)) return
@@ -123,11 +125,20 @@ object AppDownloader {
 
         try {
             notifyProgress(0, -1)
-            val conn = open(job.url, job)
+            val conn = open(job.url, job).also { connection = it }
             val total = runCatching { conn.contentLengthLong }.getOrDefault(-1L)
             if (total == 0L) throw IllegalStateException("空文件")
             // disconnect 前缓存 content-type（落盘 MIME 兼备用）
-            val effectiveMime = job.mime ?: conn.contentType
+            val responseMime = conn.contentType?.substringBefore(';')?.trim()
+            val effectiveMime = responseMime?.takeUnless { it.equals("application/octet-stream", true) }
+                ?: job.mime?.takeUnless { it.equals("application/octet-stream", true) }
+                ?: BrowserDownloads.mimeForUrl(job.url)
+            val effectiveFilename = BrowserDownloads.ensureExtension(
+                job.filename,
+                effectiveMime,
+                conn.getHeaderField("Content-Disposition"),
+                job.url
+            )
 
             var done = 0L
             conn.inputStream.use { ins: InputStream ->
@@ -150,13 +161,13 @@ object AppDownloader {
 
             // 落盘（三级回退 + 子目录）→ 完成通知（点击打开）
             val saved = BrowserDownloads.saveTempFileTo(
-                ctx, tmp, job.filename, effectiveMime, job.subdir
+                ctx, tmp, effectiveFilename, effectiveMime, job.subdir
             )
             if (saved == null) {
                 tmp.delete()
-                notifyFailed(nm, id, job.filename, "存储不可用")
+                notifyFailed(nm, id, effectiveFilename, "存储不可用")
             } else {
-                notifyDone(nm, id, job.filename, saved)
+                notifyDone(nm, id, effectiveFilename, saved)
             }
         } catch (_: InterruptedException) {
             tmp.delete()
@@ -166,7 +177,9 @@ object AppDownloader {
             tmp.delete()
             val reason = (e.message ?: e.javaClass.simpleName).take(60)
             // http 站点网络失败 → 自动换 https 重试一次（部分 CDN 只支持 https）
-            if (job.url.startsWith("http://")) {
+            if (job.url.startsWith("http://") && e !is IllegalStateException) {
+                connection?.disconnect()
+                connection = null
                 val alt = "https://" + job.url.substring(7)
                 active.remove(id)
                 runCatching { nm.cancel(id) }
@@ -175,26 +188,45 @@ object AppDownloader {
             }
             notifyFailed(nm, id, job.filename, reason)
         } finally {
+            connection?.disconnect()
             active.remove(id)
         }
     }
 
     /** 打开连接（Cookie/Referer/UA 转发 + 跟随重定向 + 非 2xx 即抛错）。 */
     private fun open(url: String, job: Job): HttpURLConnection {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.connectTimeout = 15000
-        conn.readTimeout = 30000
-        conn.instanceFollowRedirects = true
-        job.userAgent?.let { conn.setRequestProperty("User-Agent", it) }
-        job.cookie?.takeIf { it.isNotBlank() }
-            ?.let { conn.setRequestProperty("Cookie", it) }
-        job.referer?.let { conn.setRequestProperty("Referer", it) }
-        val code = conn.responseCode
-        if (code !in 200..299) {
-            conn.disconnect()
-            throw IllegalStateException("HTTP $code")
+        val originalHost = URL(url).host
+        var currentUrl = url
+        repeat(8) {
+            val conn = URL(currentUrl).openConnection() as HttpURLConnection
+            conn.connectTimeout = 15000
+            conn.readTimeout = 30000
+            conn.instanceFollowRedirects = false
+            conn.setRequestProperty("Accept", "*/*")
+            conn.setRequestProperty("Accept-Encoding", "identity")
+            job.userAgent?.let { conn.setRequestProperty("User-Agent", it) }
+            val cookie = if (URL(currentUrl).host.equals(originalHost, ignoreCase = true)) {
+                job.cookie
+            } else {
+                CookieManager.getInstance().getCookie(currentUrl)
+            }
+            cookie?.takeIf { it.isNotBlank() }?.let { conn.setRequestProperty("Cookie", it) }
+            job.referer?.let { conn.setRequestProperty("Referer", it) }
+            val code = conn.responseCode
+            if (code in 300..399) {
+                val location = conn.getHeaderField("Location")
+                conn.disconnect()
+                if (location.isNullOrBlank()) throw IllegalStateException("HTTP $code：缺少重定向地址")
+                currentUrl = URL(URL(currentUrl), location).toExternalForm()
+                return@repeat
+            }
+            if (code !in 200..299) {
+                conn.disconnect()
+                throw IllegalStateException("HTTP $code")
+            }
+            return conn
         }
-        return conn
+        throw IllegalStateException("重定向次数过多")
     }
 
     // ---- 通知 ----

@@ -38,6 +38,9 @@ interface BookmarkDao {
     @Query("SELECT * FROM bookmarks WHERE url = :url LIMIT 1")
     suspend fun findByUrl(url: String): BookmarkEntity?
 
+    @Query("SELECT * FROM bookmarks WHERE url = :url LIMIT 1")
+    fun observeByUrl(url: String): Flow<BookmarkEntity?>
+
     @Insert
     suspend fun insert(entity: BookmarkEntity): Long
 

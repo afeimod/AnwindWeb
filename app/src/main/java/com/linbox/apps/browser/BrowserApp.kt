@@ -165,6 +165,9 @@ internal fun BrowserContent(scope: WindowContentScope) {
 
     // 用户设置的主页（默认 LinBox 速度页 linbox://home）
     val defaultHome by app.settingsStore.defaultBrowserHome.collectAsState(initial = "linbox://home")
+    val activeUrl = tabManager.activeTab()?.url.orEmpty()
+    val currentBookmarkFlow = remember(activeUrl) { app.database.bookmarkDao().observeByUrl(activeUrl) }
+    val currentBookmark by currentBookmarkFlow.collectAsState(initial = null)
 
     var showBookmarks by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
@@ -271,6 +274,7 @@ internal fun BrowserContent(scope: WindowContentScope) {
                             tabManager.addressInput = url
                         }
                     },
+                    isBookmarked = currentBookmark != null,
                     onBookmark = toggleCurrentBookmark
                 )
             }
@@ -406,6 +410,7 @@ internal fun BrowserContent(scope: WindowContentScope) {
                 BrowserMenuDialog(
                     uaMode = uaMode,
                     fullscreen = isFullscreen,
+                    isBookmarked = currentBookmark != null,
                     onBack = { tabManager.getTab(tabManager.activeTabId)?.goBack(); showBrowserMenu = false },
                     onForward = { tabManager.getTab(tabManager.activeTabId)?.goForward(); showBrowserMenu = false },
                     onRefresh = { tabManager.getTab(tabManager.activeTabId)?.refresh(); showBrowserMenu = false },
@@ -488,7 +493,9 @@ internal fun BrowserContent(scope: WindowContentScope) {
                                 target.url,
                                 webView.settings.userAgentString,
                                 null,
-                                null
+                                target.mimeType.takeIf { it.isNotBlank() },
+                                -1L,
+                                target.linkUrl.takeIf { target.kind == "image" && it != webView.url }
                             )
                         }
                         longPressTarget = null
@@ -499,7 +506,9 @@ internal fun BrowserContent(scope: WindowContentScope) {
             mediaPreviewTarget?.let { target ->
                 BrowserMediaPreviewDialog(
                     url = target.url,
-                    title = if (target.kind == "video") "视频预览" else "图片预览",
+                    pageUrl = tabManager.activeTab()?.url.orEmpty(),
+                    title = if (target.kind == "video") "视频预览" else "原图预览",
+                    isVideo = target.kind == "video",
                     onDismiss = { mediaPreviewTarget = null }
                 )
             }
@@ -1357,10 +1366,18 @@ private fun BrowserLongPressDialog(
 @Composable
 private fun BrowserMediaPreviewDialog(
     url: String,
+    pageUrl: String,
     title: String,
+    isVideo: Boolean,
     onDismiss: () -> Unit
 ) {
     val theme = LocalWinTheme.current
+    val escapedUrl = url.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "&lt;")
+    val mediaHtml = if (isVideo) {
+        """<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=yes"><style>html,body{margin:0;width:100%;height:100%;background:#000}video{width:100%;height:100%;object-fit:contain}</style><video src="$escapedUrl" controls autoplay playsinline></video>"""
+    } else {
+        """<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=yes"><style>html,body{margin:0;min-width:100%;min-height:100%;background:#111}img{display:block;width:auto;height:auto;max-width:none}</style><img src="$escapedUrl">"""
+    }
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -1384,12 +1401,32 @@ private fun BrowserMediaPreviewDialog(
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
                             settings.mediaPlaybackRequiresUserGesture = false
+                            settings.builtInZoomControls = true
+                            settings.displayZoomControls = false
+                            settings.useWideViewPort = false
+                            settings.loadWithOverviewMode = false
                             setBackgroundColor(android.graphics.Color.BLACK)
-                            loadUrl(url)
+                            tag = url
+                            loadDataWithBaseURL(
+                                pageUrl.takeIf { it.startsWith("http") } ?: url,
+                                mediaHtml,
+                                "text/html",
+                                "UTF-8",
+                                null
+                            )
                         }
                     },
                     update = { webView ->
-                        if (webView.url != url) webView.loadUrl(url)
+                        if (webView.tag != url) {
+                            webView.tag = url
+                            webView.loadDataWithBaseURL(
+                                pageUrl.takeIf { it.startsWith("http") } ?: url,
+                                mediaHtml,
+                                "text/html",
+                                "UTF-8",
+                                null
+                            )
+                        }
                     },
                     onRelease = { webView ->
                         webView.stopLoading()
@@ -1406,6 +1443,7 @@ private fun BrowserMediaPreviewDialog(
 private fun BrowserMenuDialog(
     uaMode: String,
     fullscreen: Boolean,
+    isBookmarked: Boolean,
     onBack: () -> Unit,
     onForward: () -> Unit,
     onRefresh: () -> Unit,
@@ -1431,7 +1469,7 @@ private fun BrowserMenuDialog(
         Triple("主页", Icons.Default.Home, onHome),
         Triple("标签页", Icons.Default.Tab, onTabs),
         Triple("书签", Icons.Default.Bookmark, onBookmarks),
-        Triple("收藏当前页", Icons.Default.Star, onBookmarkCurrent),
+        Triple(if (isBookmarked) "取消收藏当前页" else "收藏当前页", Icons.Default.Star, onBookmarkCurrent),
         Triple("历史记录", Icons.Default.History, onHistory),
         Triple(if (uaMode == "desktop") "手机模式" else "桌面模式", Icons.Default.Devices, onToggleUa),
         Triple(if (fullscreen) "退出全屏" else "全屏", Icons.Default.Fullscreen, onToggleFullscreen),
@@ -1631,6 +1669,7 @@ private fun Toolbar(
     address: String,
     onAddressChange: (String) -> Unit,
     onGo: () -> Unit,
+    isBookmarked: Boolean,
     onBookmark: () -> Unit
 ) {
     val theme = LocalWinTheme.current
@@ -1687,8 +1726,11 @@ private fun Toolbar(
         // 「浏览器快捷」组（BrowserQuickBus）；前往由地址栏回车（keyboardActions
         // 的 onGo）承担，收藏（加/删书签）是工具条唯一保留的按钮。
         IconButton(onClick = onBookmark, modifier = Modifier.size(36.dp)) {
-            Icon(Icons.Default.StarBorder, contentDescription = "Bookmark",
-                tint = if (theme.isDark) Color.White else Color.Black)
+            Icon(
+                if (isBookmarked) Icons.Default.Star else Icons.Default.StarBorder,
+                contentDescription = if (isBookmarked) "取消收藏" else "收藏",
+                tint = if (isBookmarked) theme.accentColor else theme.buttonTextColor
+            )
         }
     }
 }
@@ -1706,21 +1748,39 @@ private fun BookmarksPanel(onSelect: (String) -> Unit, onClose: () -> Unit) {
         if (bookmarks.isEmpty()) {
             Text("暂无书签", color = if (theme.isDark) Color.White else Color.Black)
         } else {
-            bookmarks.forEach { bm ->
+            bookmarks.chunked(2).forEach { rowBookmarks ->
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onSelect(bm.url) }
-                        .padding(8.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // v3.0（LinBox 补强）：favicon 优先（Base64 PNG），
-                    // 无图标回退 ⭐ —— 浏览器图标识别展示
-                    FaviconImage(bm.favicon, size = 18)
-                    Spacer(Modifier.width(8.dp))
-                    Column {
-                        Text(bm.title, color = if (theme.isDark) Color.White else Color.Black, fontSize = 13.sp, maxLines = 1)
-                        Text(bm.url, color = theme.buttonTextColor.copy(alpha = 0.6f), fontSize = 11.sp, maxLines = 1)
+                    rowBookmarks.forEach { bm ->
+                        Column(
+                            modifier = Modifier.weight(1f).padding(vertical = 4.dp)
+                                .aspectRatio(1f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(theme.buttonBackgroundColor)
+                                .clickable { onSelect(bm.url) }
+                                .padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            FaviconImage(bm.favicon, size = 36)
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                bm.title,
+                                color = theme.buttonTextColor,
+                                fontSize = 12.sp,
+                                maxLines = 2
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                bm.url,
+                                color = theme.secondaryTextColor,
+                                fontSize = 9.sp,
+                                maxLines = 2
+                            )
+                        }
                     }
+                    if (rowBookmarks.size == 1) Spacer(Modifier.weight(1f))
                 }
             }
         }

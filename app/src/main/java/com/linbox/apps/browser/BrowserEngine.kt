@@ -513,6 +513,9 @@ object BrowserEngine {
             view?.let {
                 tab.canGoBack = it.canGoBack()
                 tab.canGoForward = it.canGoForward()
+                if (url?.startsWith("http") == true || url?.startsWith("file:") == true) {
+                    it.evaluateJavascript(FLASH_DOM_DETECT_SCRIPT, null)
+                }
             }
 
             // ===== v2.16.3 鼠标视角（3D 视角旋转）：onPageFinished 注入 =====
@@ -1356,21 +1359,49 @@ object BrowserEngine {
                 (function(){
                   if (window.__flashDomDetect) return;
                   window.__flashDomDetect = true;
-                  var SEL = 'object[type="application/x-shockwave-flash"],embed[type="application/x-shockwave-flash"],object[data$=".swf" i],embed[src$=".swf" i],object[classid*="D27CDB6E" i]';
+                  function isFlashElement(el){
+                    var tag = (el.tagName || '').toLowerCase();
+                    if (tag !== 'object' && tag !== 'embed') return false;
+                    var type = (el.getAttribute('type') || '').toLowerCase();
+                    var classid = (el.getAttribute('classid') || '').toLowerCase();
+                    var source = el.getAttribute(tag === 'object' ? 'data' : 'src') || '';
+                    if (type.indexOf('application/x-shockwave-flash') >= 0 ||
+                        classid.indexOf('d27cdb6e') >= 0 || /\.swf(?:[?#]|$)/i.test(source)) return true;
+                    if (tag === 'object') {
+                      var params = el.getElementsByTagName('param');
+                      for (var i = 0; i < params.length; i++) {
+                        var name = (params[i].getAttribute('name') || '').toLowerCase();
+                        var value = params[i].getAttribute('value') || '';
+                        if ((name === 'movie' || name === 'src') &&
+                            (/\.swf(?:[?#]|$)/i.test(value) || type.indexOf('shockwave') >= 0)) return true;
+                      }
+                    }
+                    return false;
+                  }
                   function check(){
                     try {
-                      if (document.querySelector(SEL) && window.__linboxLoadRuffle) {
-                        window.__linboxLoadRuffle();
+                      var elements = document.querySelectorAll('object,embed');
+                      for (var i = 0; i < elements.length; i++) {
+                        if (isFlashElement(elements[i])) {
+                          if (window.__linboxLoadRuffle) window.__linboxLoadRuffle();
+                          return;
+                        }
                       }
                     } catch(e) {}
                   }
                   if (document.readyState === 'loading') {
                     document.addEventListener('DOMContentLoaded', check);
-                  } else { check(); }
+                  }
+                  check();
                   if (window.MutationObserver) {
                     try {
-                      var mo = new MutationObserver(function(){ check(); });
-                      mo.observe(document.documentElement || document.body, {childList: true, subtree: true});
+                      var mo = new MutationObserver(check);
+                      mo.observe(document, {
+                        childList: true,
+                        subtree: true,
+                        attributes: true,
+                        attributeFilter: ['type', 'data', 'src', 'classid', 'name', 'value']
+                      });
                     } catch(e) {}
                   }
                 })();

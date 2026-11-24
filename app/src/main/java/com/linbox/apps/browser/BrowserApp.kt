@@ -170,6 +170,26 @@ internal fun BrowserContent(scope: WindowContentScope) {
     var showHistory by remember { mutableStateOf(false) }
     var showTabSwitcher by remember { mutableStateOf(false) }
     var showBrowserMenu by remember { mutableStateOf(false) }
+    val toggleCurrentBookmark = {
+        val url = tabManager.activeTab()?.url?.takeIf { it.isNotBlank() && it != "linbox://home" }
+            ?: tabManager.addressInput
+        if (url.isNotBlank() && url != "linbox://home") {
+            val activeTab = tabManager.activeTab()
+            val title = activeTab?.title?.takeIf { it.isNotBlank() && it != "新标签" } ?: url
+            val faviconB64 = activeTab?.faviconPng?.let {
+                runCatching { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }.getOrNull()
+            }
+            scope0.launch {
+                val dao = app.database.bookmarkDao()
+                val existing = dao.findByUrl(url)
+                if (existing == null) {
+                    dao.insert(BookmarkEntity(title = title, url = url, favicon = faviconB64))
+                } else {
+                    dao.delete(existing)
+                }
+            }
+        }
+    }
 
     // 启动时打开初始标签（会话已存在标签时跳过 —— 最小化恢复不重开）
     LaunchedEffect(Unit) {
@@ -249,33 +269,7 @@ internal fun BrowserContent(scope: WindowContentScope) {
                             tabManager.addressInput = url
                         }
                     },
-                    onBookmark = {
-                        val url = tabManager.addressInput
-                        if (url.isNotEmpty()) {
-                            // v3.0（LinBox 补强）：书签携带页面标题与 favicon
-                            //（浏览器图标识别：标签捕获 → Base64 持久化 → 列表展示）
-                            val activeTab = tabManager.tabs.firstOrNull { it.id == tabManager.activeTabId }
-                            val title = activeTab?.title?.takeIf { it.isNotBlank() && it != "新标签" } ?: url
-                            val faviconB64 = activeTab?.faviconPng?.let {
-                                runCatching { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }.getOrNull()
-                            }
-                            scope0.launch {
-                                val dao = app.database.bookmarkDao()
-                                val existing = dao.findByUrl(url)
-                                if (existing == null) {
-                                    dao.insert(
-                                        BookmarkEntity(
-                                            title = title,
-                                            url = url,
-                                            favicon = faviconB64
-                                        )
-                                    )
-                                } else {
-                                    dao.delete(existing)
-                                }
-                            }
-                        }
-                    }
+                    onBookmark = toggleCurrentBookmark
                 )
             }
 
@@ -301,33 +295,7 @@ internal fun BrowserContent(scope: WindowContentScope) {
                     onShowHistory = { showHistory = !showHistory },
                     onToggleView3d = { showView3dSettings = true },
                     onOpenSniffer = { com.linbox.apps.browser.ResourceSnifferPanelBus.open() },
-                    onBookmark = {
-                        val url = tabManager.addressInput
-                        if (url.isNotEmpty()) {
-                            // v3.0（LinBox 补强）：书签携带页面标题与 favicon
-                            //（浏览器图标识别：标签捕获 → Base64 持久化 → 列表展示）
-                            val activeTab = tabManager.tabs.firstOrNull { it.id == tabManager.activeTabId }
-                            val title = activeTab?.title?.takeIf { it.isNotBlank() && it != "新标签" } ?: url
-                            val faviconB64 = activeTab?.faviconPng?.let {
-                                runCatching { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }.getOrNull()
-                            }
-                            scope0.launch {
-                                val dao = app.database.bookmarkDao()
-                                val existing = dao.findByUrl(url)
-                                if (existing == null) {
-                                    dao.insert(
-                                        BookmarkEntity(
-                                            title = title,
-                                            url = url,
-                                            favicon = faviconB64
-                                        )
-                                    )
-                                } else {
-                                    dao.delete(existing)
-                                }
-                            }
-                        }
-                    },
+                    onBookmark = toggleCurrentBookmark,
                     // LinBrowser 独立版：悬浮球「关闭浏览器」→ 收起应用回桌面
                     //（标签会话跨进出存活，再进不丢）
                     onExit = {
@@ -445,7 +413,8 @@ internal fun BrowserContent(scope: WindowContentScope) {
                     },
                     onTabs = { showBrowserMenu = false; showTabSwitcher = true },
                     onBookmarks = { showBrowserMenu = false; showBookmarks = true },
-                    onHistory = { showBrowserMenu = false; showHistory = true },
+                    onBookmarkCurrent = { toggleCurrentBookmark(); showBrowserMenu = false },
+                    onHistory = { showBrowserMenu = false; showHistory = true }
                     onToggleUa = { toggleUaMode(); showBrowserMenu = false },
                     onToggleFullscreen = { toggleFullscreen(); showBrowserMenu = false },
                     onSniffer = { com.linbox.apps.browser.ResourceSnifferPanelBus.open(); showBrowserMenu = false },
@@ -1248,6 +1217,7 @@ private fun BrowserMenuDialog(
     onHome: () -> Unit,
     onTabs: () -> Unit,
     onBookmarks: () -> Unit,
+    onBookmarkCurrent: () -> Unit,
     onHistory: () -> Unit,
     onToggleUa: () -> Unit,
     onToggleFullscreen: () -> Unit,
@@ -1265,6 +1235,7 @@ private fun BrowserMenuDialog(
         Triple("主页", Icons.Default.Home, onHome),
         Triple("标签页", Icons.Default.Tab, onTabs),
         Triple("书签", Icons.Default.Bookmark, onBookmarks),
+        Triple("收藏当前页", Icons.Default.Star, onBookmarkCurrent),
         Triple("历史记录", Icons.Default.History, onHistory),
         Triple(if (uaMode == "desktop") "手机模式" else "桌面模式", Icons.Default.Devices, onToggleUa),
         Triple(if (fullscreen) "退出全屏" else "全屏", Icons.Default.Fullscreen, onToggleFullscreen),

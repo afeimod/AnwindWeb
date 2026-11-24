@@ -170,6 +170,8 @@ internal fun BrowserContent(scope: WindowContentScope) {
     var showHistory by remember { mutableStateOf(false) }
     var showTabSwitcher by remember { mutableStateOf(false) }
     var showBrowserMenu by remember { mutableStateOf(false) }
+    var longPressTarget by remember { mutableStateOf<BrowserLongPressTarget?>(null) }
+    var mediaPreviewTarget by remember { mutableStateOf<BrowserLongPressTarget?>(null) }
     val toggleCurrentBookmark = {
         val url = tabManager.activeTab()?.url?.takeIf { it.isNotBlank() && it != "linbox://home" }
             ?: tabManager.addressInput
@@ -355,6 +357,7 @@ internal fun BrowserContent(scope: WindowContentScope) {
                                 tab = activeTab,
                                 tabManager = tabManager,
                                 uaMode = uaMode,
+                                onLongPress = { longPressTarget = it },
                                 onRetry = { tabManager.getTab(tabManager.activeTabId)?.refresh() }
                             )
                         }
@@ -421,7 +424,83 @@ internal fun BrowserContent(scope: WindowContentScope) {
                     onSettings = { showBrowserMenu = false; showView3dSettings = true },
                     onPickBackground = { HomeBgManager.pick(); showBrowserMenu = false },
                     onClearBackground = { HomeBgManager.clear(); showBrowserMenu = false },
+                    onExitBrowser = { showBrowserMenu = false; BrowserQuickBus.exitBrowser?.invoke() },
                     onDismiss = { showBrowserMenu = false }
+                )
+            }
+            longPressTarget?.let { target ->
+                BrowserLongPressDialog(
+                    target = target,
+                    onOpen = { url ->
+                        tabManager.activeTab()?.loadUrl(url)
+                        tabManager.addressInput = url
+                        longPressTarget = null
+                    },
+                    onOpenNewTab = { url ->
+                        tabManager.openTab(url)
+                        tabManager.addressInput = url
+                        longPressTarget = null
+                    },
+                    onCopy = { label, text ->
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(label, text))
+                        android.widget.Toast.makeText(context, "已复制", android.widget.Toast.LENGTH_SHORT).show()
+                        longPressTarget = null
+                    },
+                    onShare = { text ->
+                        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(android.content.Intent.EXTRA_TEXT, text)
+                        }
+                        context.startActivity(android.content.Intent.createChooser(intent, "分享链接"))
+                        longPressTarget = null
+                    },
+                    onPreview = {
+                        if (target.url.startsWith("blob:")) {
+                            val webView = tabManager.activeTab()?.webView
+                            val quotedUrl = org.json.JSONObject.quote(target.url)
+                            val tag = if (target.kind == "video") "video" else "img"
+                            webView?.evaluateJavascript("""
+                                (function(){
+                                  var overlay=document.createElement('div');
+                                  overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;background:#000;display:flex;align-items:center;justify-content:center';
+                                  var media=document.createElement('$tag');
+                                  media.src=$quotedUrl;
+                                  media.style.cssText='max-width:100%;max-height:100%;object-fit:contain';
+                                  if('$tag'==='video'){media.controls=true;media.playsInline=true;}
+                                  var close=document.createElement('button');
+                                  close.textContent='关闭预览';
+                                  close.style.cssText='position:absolute;right:16px;top:16px;z-index:1;padding:10px 14px';
+                                  close.onclick=function(){try{media.pause&&media.pause();}catch(e){}overlay.remove();};
+                                  overlay.appendChild(media);overlay.appendChild(close);document.body.appendChild(overlay);
+                                })();
+                            """.trimIndent(), null)
+                        } else {
+                            mediaPreviewTarget = target
+                        }
+                        longPressTarget = null
+                    },
+                    onDownload = {
+                        val webView = tabManager.activeTab()?.webView
+                        if (webView != null) {
+                            BrowserDownloads.handleDownload(
+                                webView,
+                                target.url,
+                                webView.settings.userAgentString,
+                                null,
+                                null
+                            )
+                        }
+                        longPressTarget = null
+                    },
+                    onDismiss = { longPressTarget = null }
+                )
+            }
+            mediaPreviewTarget?.let { target ->
+                BrowserMediaPreviewDialog(
+                    url = target.url,
+                    title = if (target.kind == "video") "视频预览" else "图片预览",
+                    onDismiss = { mediaPreviewTarget = null }
                 )
             }
 
@@ -477,6 +556,7 @@ private fun WebViewContainer(
     tab: BrowserTab,
     tabManager: TabManager,
     uaMode: String,
+    onLongPress: (BrowserLongPressTarget) -> Unit,
     onRetry: () -> Unit = {}
 ) {
     val theme = LocalWinTheme.current
@@ -506,6 +586,10 @@ private fun WebViewContainer(
 
             override fun onError(message: String?) {
                 errorMessage = message
+            }
+
+            override fun onLongPress(target: BrowserLongPressTarget) {
+                onLongPress(target)
             }
         }
         tabManager.uiOwner = uiToken
@@ -1208,6 +1292,117 @@ private fun TabSwitcherDialog(
 }
 
 @Composable
+private fun BrowserLongPressDialog(
+    target: BrowserLongPressTarget,
+    onOpen: (String) -> Unit,
+    onOpenNewTab: (String) -> Unit,
+    onCopy: (String, String) -> Unit,
+    onShare: (String) -> Unit,
+    onPreview: () -> Unit,
+    onDownload: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val theme = LocalWinTheme.current
+    val linkedUrl = target.linkUrl.ifBlank { target.url }
+    val title = when (target.kind) {
+        "image" -> "图片操作"
+        "video" -> "视频操作"
+        "flash" -> "Flash 内容操作"
+        else -> "链接操作"
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = theme.windowBackgroundColor,
+        titleContentColor = theme.buttonTextColor,
+        textContentColor = theme.buttonTextColor,
+        title = { Text(title) },
+        text = {
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                @Composable
+                fun action(label: String, callback: () -> Unit) {
+                    TextButton(onClick = callback, modifier = Modifier.fillMaxWidth()) {
+                        Text(label, modifier = Modifier.fillMaxWidth(), color = theme.buttonTextColor)
+                    }
+                }
+                if (target.kind == "link" || target.linkUrl.isNotBlank()) {
+                    action("打开链接", { onOpen(linkedUrl) })
+                    action("在新标签页打开链接", { onOpenNewTab(linkedUrl) })
+                    action("复制链接地址", { onCopy("链接地址", linkedUrl) })
+                    if (target.linkText.isNotBlank()) {
+                        action("复制链接文字", { onCopy("链接文字", target.linkText) })
+                    }
+                    action("分享链接", { onShare(linkedUrl) })
+                }
+                if (target.kind == "image" || target.kind == "video") {
+                    action("预览", onPreview)
+                    action("在当前标签打开媒体", { onOpen(target.url) })
+                    action("在新标签页打开媒体", { onOpenNewTab(target.url) })
+                    action("下载/保存", onDownload)
+                    action("复制媒体地址", { onCopy("媒体地址", target.url) })
+                    action("分享媒体", { onShare(target.url) })
+                } else if (target.kind == "flash") {
+                    action("打开 Flash 地址", { onOpen(target.url) })
+                    action("在新标签页打开", { onOpenNewTab(target.url) })
+                    action("下载 SWF", onDownload)
+                    action("复制地址", { onCopy("Flash 地址", target.url) })
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("取消", color = theme.accentColor) }
+        }
+    )
+}
+
+@Composable
+private fun BrowserMediaPreviewDialog(
+    url: String,
+    title: String,
+    onDismiss: () -> Unit
+) {
+    val theme = LocalWinTheme.current
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            color = theme.windowBackgroundColor,
+            tonalElevation = 6.dp
+        ) {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, top = 6.dp, end = 6.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(title, color = theme.buttonTextColor, modifier = Modifier.weight(1f))
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭预览", tint = theme.buttonTextColor)
+                    }
+                }
+                AndroidView(
+                    factory = { context ->
+                        android.webkit.WebView(context).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.mediaPlaybackRequiresUserGesture = false
+                            setBackgroundColor(android.graphics.Color.BLACK)
+                            loadUrl(url)
+                        }
+                    },
+                    update = { webView ->
+                        if (webView.url != url) webView.loadUrl(url)
+                    },
+                    onRelease = { webView ->
+                        webView.stopLoading()
+                        webView.destroy()
+                    },
+                    modifier = Modifier.fillMaxWidth().height(380.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun BrowserMenuDialog(
     uaMode: String,
     fullscreen: Boolean,
@@ -1225,6 +1420,7 @@ private fun BrowserMenuDialog(
     onSettings: () -> Unit,
     onPickBackground: () -> Unit,
     onClearBackground: () -> Unit,
+    onExitBrowser: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val theme = LocalWinTheme.current
@@ -1242,7 +1438,8 @@ private fun BrowserMenuDialog(
         Triple("资源嗅探", Icons.Default.WifiTethering, onSniffer),
         Triple("3D 视角设置", Icons.Default.Settings, onSettings),
         Triple("设置背景", Icons.Default.Wallpaper, onPickBackground),
-        Triple("恢复默认背景", Icons.Default.Image, onClearBackground)
+        Triple("恢复默认背景", Icons.Default.Image, onClearBackground),
+        Triple("关闭浏览器", Icons.Default.ExitToApp, onExitBrowser)
     )
     AlertDialog(
         onDismissRequest = onDismiss,

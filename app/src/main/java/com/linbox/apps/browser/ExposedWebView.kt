@@ -1,6 +1,7 @@
 package com.linbox.apps.browser
 
 import android.content.Context
+import android.view.MotionEvent
 import android.webkit.WebView
 
 /**
@@ -11,6 +12,19 @@ import android.webkit.WebView
  * —— 用公开子类包装一层即可（其余能力与 WebView 完全一致）。
  */
 class ExposedWebView(context: Context) : WebView(context) {
+    var lastTouchX = 0f
+        private set
+    var lastTouchY = 0f
+        private set
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            lastTouchX = event.x
+            lastTouchY = event.y
+        }
+        return super.onTouchEvent(event)
+    }
+
     /** 页面总高度（px，含不可见部分） */
     fun verticalScrollRange(): Int = computeVerticalScrollRange()
 

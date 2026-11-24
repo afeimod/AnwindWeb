@@ -7,6 +7,9 @@ import android.graphics.Bitmap
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.net.http.SslError
+import android.webkit.WebView.HitTestResult
+import org.json.JSONObject
+import org.json.JSONTokener
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
@@ -289,6 +292,60 @@ object BrowserEngine {
             BrowserDownloads.handleDownload(
                 wv, url, userAgent, contentDisposition, mimetype, contentLength
             )
+        }
+
+        wv.setOnLongClickListener { view ->
+            val webView = view as WebView
+            val hit = webView.hitTestResult
+            val kind = when (hit.type) {
+                HitTestResult.ANCHOR_TYPE, HitTestResult.SRC_ANCHOR_TYPE -> "link"
+                HitTestResult.IMAGE_TYPE, HitTestResult.SRC_IMAGE_ANCHOR_TYPE -> "image"
+                else -> "probe"
+            }
+            val exposed = webView as? ExposedWebView
+            val scale = webView.scale.takeIf { it > 0f } ?: 1f
+            val x = ((exposed?.lastTouchX ?: 0f) / scale).toInt()
+            val y = ((exposed?.lastTouchY ?: 0f) / scale).toInt()
+            val fallbackUrl = JSONObject.quote(hit.extra ?: "")
+            val script = """
+                (function(){
+                  var el=document.elementFromPoint($x,$y);
+                  if(!el)return JSON.stringify({kind:'$kind',url:$fallbackUrl});
+                  var link=el.closest&&el.closest('a[href]');
+                  var image=el.closest&&el.closest('img');
+                  var video=el.closest&&el.closest('video');
+                  if(!video){
+                    var videos=document.querySelectorAll('video');
+                    for(var i=0;i<videos.length;i++){
+                      var rect=videos[i].getBoundingClientRect();
+                      if($x>=rect.left&&$x<=rect.right&&$y>=rect.top&&$y<=rect.bottom){video=videos[i];break;}
+                    }
+                  }
+                  var object=el.closest&&el.closest('object,embed');
+                  var data={kind:'$kind',url:$fallbackUrl,linkUrl:link?link.href:'',linkText:link?(link.innerText||link.textContent||'').trim():''};
+                  if(image){data.kind='image';data.url=image.currentSrc||image.src||data.url;}
+                  else if(video){data.kind='video';data.url=video.currentSrc||video.src||data.url;}
+                  else if(object){data.kind='flash';data.url=object.data||object.src||data.url;}
+                  else if(link){data.kind='link';data.url=link.href;}
+                  return JSON.stringify(data);
+                })();
+            """.trimIndent()
+            webView.evaluateJavascript(script) { result ->
+                runCatching {
+                    val jsonText = JSONTokener(result ?: "null").nextValue() as? String ?: return@runCatching
+                    val json = JSONObject(jsonText)
+                    val target = BrowserLongPressTarget(
+                        kind = json.optString("kind", kind),
+                        url = json.optString("url", hit.extra ?: ""),
+                        linkUrl = json.optString("linkUrl"),
+                        linkText = json.optString("linkText")
+                    )
+                    if (target.kind != "probe" && target.url.isNotBlank()) {
+                        manager.ui?.onLongPress(target)
+                    }
+                }
+            }
+            kind != "probe"
         }
 
         // v6.10：blob: 下载落盘桥（页面 JS 经 XHR 读 blob 后分块回调）

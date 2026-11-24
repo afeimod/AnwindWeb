@@ -100,6 +100,13 @@ class BrowserTab(
  * WebView 的 client 是【一次性创建、跨重组存活】的，不能直接捕获 Compose 状态，
  * 因此通过该接口路由到当前组合中的 WebViewContainer。
  */
+data class BrowserLongPressTarget(
+    val kind: String,
+    val url: String,
+    val linkUrl: String = "",
+    val linkText: String = ""
+)
+
 interface TabUiCallbacks {
     /** 用户主动导航（点击链接/地址栏）→ 同步地址栏 */
     fun onUrlChanged(url: String)
@@ -113,6 +120,8 @@ interface TabUiCallbacks {
 
     /** null 表示清除错误提示 */
     fun onError(message: String?)
+
+    fun onLongPress(target: BrowserLongPressTarget)
 }
 
 /**

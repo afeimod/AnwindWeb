@@ -56,6 +56,7 @@ class SettingsStore(private val context: Context) {
         // v1.2.0（用户需求 5）：自定义主页背景 —— 空 = 默认；
         // "image:/绝对路径" 静态图 / "video:/绝对路径" 循环静音视频
         val HOMEPAGE_BG = stringPreferencesKey("homepage_bg")
+        val BROWSER_HOME_SITES = stringPreferencesKey("browser_home_sites")
 
         // === 浏览器 3D 视角（v2.16.2：鼠标视角模式，用于电脑网页游戏） ===
         // 开启后：在网页上按住拖动 = 按住鼠标移动视角（把拖动增量合成
@@ -239,6 +240,8 @@ class SettingsStore(private val context: Context) {
     // v1.2.0（用户需求 5）：自定义主页背景（图/视频）；空串 = 默认纯色
     val homepageBg: Flow<String> = context.appPrefs.data
         .map { it[Keys.HOMEPAGE_BG] ?: "" }
+    val browserHomeSites: Flow<String> = context.appPrefs.data
+        .map { it[Keys.BROWSER_HOME_SITES] ?: "[]" }
 
     // === 浏览器 3D 视角（v2.16） ===
     val browser3dEnabled: Flow<Boolean> = context.appPrefs.data.map { it[Keys.BROWSER_3D_ENABLED] ?: false }
@@ -415,6 +418,10 @@ class SettingsStore(private val context: Context) {
     // v1.2.0（用户需求 5）：自定义主页背景 —— "image:路径" / "video:路径" / 空串清除
     suspend fun setHomepageBg(value: String) {
         context.appPrefs.edit { it[Keys.HOMEPAGE_BG] = value }
+    }
+
+    suspend fun setBrowserHomeSites(value: String) {
+        context.appPrefs.edit { it[Keys.BROWSER_HOME_SITES] = value }
     }
 
     // === 浏览器 3D 视角 setter（v2.16） ===

@@ -1,6 +1,8 @@
 package com.linbox.apps.browser
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -44,7 +46,9 @@ import com.linbox.core.window.WindowManager
 import com.linbox.data.db.entity.BookmarkEntity
 import com.linbox.data.model.DesktopItemType
 import com.linbox.util.ImmersiveMode
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 浏览器应用定义。
@@ -884,39 +888,7 @@ private fun BrowserHomePage(onNavigate: (String) -> Unit) {
 
         Spacer(Modifier.height(26.dp))
 
-        // ===== 4 列快捷宫格（12 站，彩色瓦片） =====
-        val quickLinks = listOf(
-            QuickLink("必应", "https://www.bing.com", "🔍", Color(0xFF1498B4)),
-            QuickLink("百度", "https://www.baidu.com", "🐾", Color(0xFF3B6EE8)),
-            QuickLink("B站", "https://www.bilibili.com", "📺", Color(0xFFFB7299)),
-            QuickLink("GitHub", "https://github.com", "🐙", Color(0xFF5B6B7C)),
-            QuickLink("知乎", "https://www.zhihu.com", "📘", Color(0xFF2E7CD6)),
-            QuickLink("微博", "https://weibo.com", "🐦", Color(0xFFE8762C)),
-            QuickLink("淘宝", "https://www.taobao.com", "🛍️", Color(0xFFFF7A2E)),
-            QuickLink("京东", "https://www.jd.com", "🐶", Color(0xFFD8332F)),
-            QuickLink("抖音", "https://www.douyin.com", "🎵", Color(0xFF231F20)),
-            QuickLink("豆瓣", "https://www.douban.com", "📚", Color(0xFF3BA272)),
-            QuickLink("Wikipedia", "https://www.wikipedia.org", "🌍", Color(0xFF6B7B8C)),
-            QuickLink("YouTube", "https://www.youtube.com", "▶️", Color(0xFFFF4433))
-        )
-        quickLinks.chunked(4).forEach { rowLinks ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                rowLinks.forEach { link ->
-                    QuickLinkItem(
-                        link = link,
-                        dark = theme.isDark || onBg,
-                        onClick = { onNavigate(link.url) },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                // 不足 4 个时补位占齐
-                repeat(4 - rowLinks.size) { Spacer(Modifier.weight(1f)) }
-            }
-            Spacer(Modifier.height(18.dp))
-        }
+        BrowserHomeQuickLinks(onNavigate = onNavigate, dark = theme.isDark || onBg, landscape = false)
         Spacer(Modifier.height(12.dp))
         } // end Column（内容）
 
@@ -1004,42 +976,184 @@ private fun BrowserHomeLandscape(onNavigate: (String) -> Unit) {
 
             Spacer(Modifier.height(18.dp))
 
-            // ===== 横向快捷导航（旧版形态：单行 LazyRow） =====
-            val quickLinks = listOf(
-                QuickLink("必应", "https://www.bing.com", "🔍", Color(0xFF1498B4)),
-                QuickLink("百度", "https://www.baidu.com", "🐾", Color(0xFF3B6EE8)),
-                QuickLink("B站", "https://www.bilibili.com", "📺", Color(0xFFFB7299)),
-                QuickLink("GitHub", "https://github.com", "🐙", Color(0xFF5B6B7C)),
-                QuickLink("知乎", "https://www.zhihu.com", "📘", Color(0xFF2E7CD6)),
-                QuickLink("微博", "https://weibo.com", "🐦", Color(0xFFE8762C)),
-                QuickLink("淘宝", "https://www.taobao.com", "🛍️", Color(0xFFFF7A2E)),
-                QuickLink("京东", "https://www.jd.com", "🐶", Color(0xFFD8332F)),
-                QuickLink("抖音", "https://www.douyin.com", "🎵", Color(0xFF231F20)),
-                QuickLink("豆瓣", "https://www.douban.com", "📚", Color(0xFF3BA272)),
-                QuickLink("Wikipedia", "https://www.wikipedia.org", "🌍", Color(0xFF6B7B8C)),
-                QuickLink("YouTube", "https://www.youtube.com", "▶️", Color(0xFFFF4433))
-            )
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(quickLinks) { link ->
-                    QuickLinkItem(
-                        link = link,
-                        dark = theme.isDark || onBg,
-                        onClick = { onNavigate(link.url) },
-                        modifier = Modifier.width(76.dp)
-                    )
-                }
-            }
+            BrowserHomeQuickLinks(onNavigate = onNavigate, dark = theme.isDark || onBg, landscape = true)
             Spacer(Modifier.height(12.dp))
         } // end Column
 
     } // end Box
 }
 
+@Composable
+private fun BrowserHomeQuickLinks(
+    onNavigate: (String) -> Unit,
+    dark: Boolean,
+    landscape: Boolean
+) {
+    val app = LinBoxApp.get()
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val sitesJson by app.settingsStore.browserHomeSites.collectAsState(initial = "[]")
+    val customLinks = remember(sitesJson) {
+        runCatching {
+            val array = org.json.JSONArray(sitesJson)
+            List(array.length()) { index ->
+                val site = array.getJSONObject(index)
+                val icon = site.optString("icon", "🌐")
+                QuickLink(
+                    name = site.optString("name"),
+                    url = site.optString("url"),
+                    emoji = if (icon.startsWith("image:")) "" else icon,
+                    tint = Color(0xFF64748B),
+                    iconPath = icon.takeIf { it.startsWith("image:") }?.removePrefix("image:")
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+    var showAddDialog by remember { mutableStateOf(false) }
+    var newName by remember { mutableStateOf("") }
+    var newUrl by remember { mutableStateOf("") }
+    var newIcon by remember { mutableStateOf("🌐") }
+    var newIconPath by remember { mutableStateOf("") }
+    val iconPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            coroutineScope.launch {
+                val path = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val mime = context.contentResolver.getType(uri).orEmpty()
+                        if (!mime.startsWith("image/")) return@runCatching null
+                        val ext = mime.substringAfter('/', "png").substringBefore('+').take(8)
+                        val dir = java.io.File(context.filesDir, "browser_home_icons").apply { mkdirs() }
+                        val file = java.io.File(dir, "site_${System.currentTimeMillis()}.$ext")
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            file.outputStream().use { output -> input.copyTo(output) }
+                        } ?: return@runCatching null
+                        file.absolutePath
+                    }.getOrNull()
+                }
+                if (path != null) newIconPath = path
+            }
+        }
+    }
+    val quickLinks = remember(customLinks) {
+        listOf(
+            QuickLink("必应", "https://www.bing.com", "🔍", Color(0xFF1498B4)),
+            QuickLink("百度", "https://www.baidu.com", "🐾", Color(0xFF3B6EE8)),
+            QuickLink("B站", "https://www.bilibili.com", "📺", Color(0xFFFB7299)),
+            QuickLink("GitHub", "https://github.com", "🐙", Color(0xFF5B6B7C)),
+            QuickLink("知乎", "https://www.zhihu.com", "📘", Color(0xFF2E7CD6)),
+            QuickLink("微博", "https://weibo.com", "🐦", Color(0xFFE8762C)),
+            QuickLink("淘宝", "https://www.taobao.com", "🛍️", Color(0xFFFF7A2E)),
+            QuickLink("京东", "https://www.jd.com", "🐶", Color(0xFFD8332F)),
+            QuickLink("抖音", "https://www.douyin.com", "🎵", Color(0xFF231F20)),
+            QuickLink("豆瓣", "https://www.douban.com", "📚", Color(0xFF3BA272)),
+            QuickLink("Wikipedia", "https://www.wikipedia.org", "🌍", Color(0xFF6B7B8C)),
+            QuickLink("YouTube", "https://www.youtube.com", "▶️", Color(0xFFFF4433))
+        ) + customLinks
+    }
+
+    if (landscape) {
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(quickLinks) { link ->
+                QuickLinkItem(link, dark, { onNavigate(link.url) }, Modifier.width(76.dp))
+            }
+            item {
+                QuickLinkAddItem(dark, Modifier.width(76.dp)) { showAddDialog = true }
+            }
+        }
+    } else {
+        (quickLinks.map { it as QuickLink? } + null).chunked(4).forEach { rowLinks ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                rowLinks.forEach { link ->
+                    if (link != null) {
+                        QuickLinkItem(link, dark, { onNavigate(link.url) }, Modifier.weight(1f))
+                    } else {
+                        QuickLinkAddItem(dark, Modifier.weight(1f)) { showAddDialog = true }
+                    }
+                }
+                repeat(4 - rowLinks.size) { Spacer(Modifier.weight(1f)) }
+            }
+            Spacer(Modifier.height(18.dp))
+        }
+    }
+
+    if (showAddDialog) {
+        val theme = LocalWinTheme.current
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            containerColor = theme.windowBackgroundColor,
+            titleContentColor = theme.buttonTextColor,
+            textContentColor = theme.buttonTextColor,
+            title = { Text("添加自定义网站") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = newName, onValueChange = { newName = it }, label = { Text("名称") }, singleLine = true)
+                    OutlinedTextField(value = newUrl, onValueChange = { newUrl = it }, label = { Text("网址") }, singleLine = true)
+                    OutlinedTextField(value = newIcon, onValueChange = { newIcon = it.take(8) }, label = { Text("图标（emoji 或符号）") }, singleLine = true)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (newIconPath.isNotBlank()) {
+                            val bitmap = remember(newIconPath) { decodeSiteIcon(newIconPath) }
+                            if (bitmap != null) Image(bitmap.asImageBitmap(), null, Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)))
+                        } else {
+                            Text(newIcon.ifBlank { "🌐" }, fontSize = 28.sp)
+                        }
+                        TextButton(onClick = { iconPicker.launch(arrayOf("image/*")) }) {
+                            Text("从相册选择图标")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val name = newName.trim()
+                    val rawUrl = newUrl.trim()
+                    if (name.isNotEmpty() && rawUrl.isNotEmpty()) {
+                        val url = normalizeUrl(rawUrl)
+                        val icon = if (newIconPath.isNotBlank()) "image:$newIconPath" else newIcon.trim().ifBlank { "🌐" }
+                        val array = runCatching { org.json.JSONArray(sitesJson) }.getOrDefault(org.json.JSONArray())
+                        array.put(org.json.JSONObject().put("name", name).put("url", url).put("icon", icon))
+                        coroutineScope.launch { app.settingsStore.setBrowserHomeSites(array.toString()) }
+                        newName = ""
+                        newUrl = ""
+                        newIcon = "🌐"
+                        newIconPath = ""
+                        showAddDialog = false
+                    }
+                }) { Text("添加", color = theme.accentColor) }
+            },
+            dismissButton = { TextButton(onClick = { showAddDialog = false }) { Text("取消") } }
+        )
+    }
+}
+
+@Composable
+private fun QuickLinkAddItem(dark: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    val theme = LocalWinTheme.current
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier.clickable(onClick = onClick).padding(vertical = 4.dp)
+    ) {
+        Box(
+            modifier = Modifier.size(52.dp).background(theme.accentColor.copy(alpha = if (dark) 0.3f else 0.14f), RoundedCornerShape(16.dp)),
+            contentAlignment = Alignment.Center
+        ) { Icon(Icons.Default.Add, contentDescription = "添加网站", tint = theme.accentColor, modifier = Modifier.size(28.dp)) }
+        Spacer(Modifier.height(6.dp))
+        Text("添加", color = if (dark) Color.White else Color.Black, fontSize = 11.sp, maxLines = 1)
+    }
+}
+
+private fun decodeSiteIcon(path: String): android.graphics.Bitmap? = runCatching {
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    android.graphics.BitmapFactory.decodeFile(path, bounds)
+    val sample = maxOf(1, maxOf(bounds.outWidth, bounds.outHeight) / 128)
+    android.graphics.BitmapFactory.decodeFile(path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+}.getOrNull()
+
 private data class QuickLink(
     val name: String,
     val url: String,
     val emoji: String,
-    val tint: Color
+    val tint: Color,
+    val iconPath: String? = null
 )
 
 /**
@@ -1168,7 +1282,17 @@ private fun QuickLinkItem(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            Text(link.emoji, fontSize = 24.sp)
+            val iconBitmap = remember(link.iconPath) { link.iconPath?.let(::decodeSiteIcon) }
+            if (iconBitmap != null) {
+                Image(
+                    bitmap = iconBitmap.asImageBitmap(),
+                    contentDescription = link.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp))
+                )
+            } else {
+                Text(link.emoji.ifBlank { "🌐" }, fontSize = 24.sp)
+            }
         }
         Spacer(Modifier.height(6.dp))
         Text(
@@ -1378,14 +1502,17 @@ private fun BrowserMediaPreviewDialog(
     } else {
         """<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=yes"><style>html,body{margin:0;min-width:100%;min-height:100%;background:#111}img{display:block;width:auto;height:auto;max-width:none}</style><img src="$escapedUrl">"""
     }
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Surface(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth(0.96f).fillMaxHeight(0.92f),
             shape = RoundedCornerShape(18.dp),
             color = theme.windowBackgroundColor,
             tonalElevation = 6.dp
         ) {
-            Column {
+            Column(Modifier.fillMaxSize()) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(start = 16.dp, top = 6.dp, end = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -1432,7 +1559,7 @@ private fun BrowserMediaPreviewDialog(
                         webView.stopLoading()
                         webView.destroy()
                     },
-                    modifier = Modifier.fillMaxWidth().height(380.dp)
+                    modifier = Modifier.weight(1f).fillMaxWidth()
                 )
             }
         }

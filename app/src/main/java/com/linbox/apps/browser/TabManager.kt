@@ -228,7 +228,12 @@ class TabManager {
                 tab.webView = null
             }, 2000)
         }
-        if (activeTabId == id) {
+        if (_tabs.isEmpty()) {
+            val home = BrowserTab(initialUrl = "linbox://home")
+            _tabs.add(home)
+            activeTabId = home.id
+            addressInput = ""
+        } else if (activeTabId == id) {
             val next = _tabs.lastOrNull() ?: _tabs.firstOrNull()
             activeTabId = next?.id
             addressInput = when (next?.url) {

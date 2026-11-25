@@ -65,9 +65,24 @@ fun ResourceSnifferPanel() {
     val selected = remember { mutableStateOf(setOf<String>()) }
     val expandedDirs = remember { mutableStateOf(setOf<String>()) }
 
-    // 过滤结果（chips 变化时重算；目录展开默认全展开）
+    val swfResources = remember(version) { resources.filter { it.kind == ResourceSniffer.Kind.SWF } }
+
+    // SWF 相关目录中的图片、脚本、配置等文件常是游戏运行必需资源。
+    fun belongsToSwfDirectory(resource: ResourceSniffer.Res): Boolean =
+        resource.kind == ResourceSniffer.Kind.SWF || swfResources.any { swf ->
+            resource.host == swf.host && when {
+                swf.dir.isBlank() -> resource.dir.isBlank()
+                else -> resource.dir == swf.dir || resource.dir.startsWith("${swf.dir}/")
+            }
+        }
+
+    // SWF 筛选同时展示同 host 的 SWF 所在目录及其子目录资源。
     val filtered = remember(version, filter) {
-        resources.filter { filter == null || it.kind == filter }
+        when (filter) {
+            null -> resources
+            ResourceSniffer.Kind.SWF -> resources.filter(::belongsToSwfDirectory)
+            else -> resources.filter { it.kind == filter }
+        }
     }
     LaunchedEffect(version, filter) {
         expandedDirs.value = buildSet {
@@ -149,9 +164,24 @@ fun ResourceSnifferPanel() {
             ) {
                 FilterChip("全部 ${resources.size}", filter == null) { filter = null }
                 ResourceSniffer.Kind.entries.forEach { k ->
-                    val n = resources.count { it.kind == k }
-                    if (n > 0) FilterChip("${k.label} $n", filter == k) { filter = k }
+                    val n = if (k == ResourceSniffer.Kind.SWF) {
+                        resources.count(::belongsToSwfDirectory)
+                    } else {
+                        resources.count { it.kind == k }
+                    }
+                    if (n > 0) {
+                        val label = if (k == ResourceSniffer.Kind.SWF) "SWF及配套 $n" else "${k.label} $n"
+                        FilterChip(label, filter == k) { filter = k }
+                    }
                 }
+            }
+            if (filter == ResourceSniffer.Kind.SWF) {
+                Text(
+                    "显示 SWF 所在目录及子目录中的配套资源，可勾选目录后一起下载",
+                    color = Color(0xFF9FB3C8),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 5.dp)
+                )
             }
 
             // ---- 目录树列表 ----

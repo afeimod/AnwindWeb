@@ -26,7 +26,7 @@ object GamepadController {
     // 元素类型与动作
     // ============================================================
 
-    enum class ElementType { BUTTON, JOYSTICK, DPAD }
+    enum class ElementType { BUTTON, JOYSTICK, DPAD, TOUCHPAD }
 
     /** 方向模式 */
     enum class DirMode { ARROWS, WASD }
@@ -226,7 +226,9 @@ object GamepadController {
             posX = 0.88f, posY = 0.42f, sizeDp = 38f),
         PadElement(type = ElementType.BUTTON, label = "≡",
             action = PadAction.key(KeyEvent.KEYCODE_TAB, "Tab"),
-            posX = 0.50f, posY = 0.84f, sizeDp = 32f)
+            posX = 0.50f, posY = 0.84f, sizeDp = 32f),
+        PadElement(type = ElementType.TOUCHPAD, label = "鼠标触控板",
+            posX = 0.50f, posY = 0.48f, sizeDp = 150f)
     )
 
     /** 简单布局：仅左十字键（方向键） + 右 J/K 两键（v6.3 尺寸同步重校）。 */
@@ -238,7 +240,9 @@ object GamepadController {
             posX = 0.82f, posY = 0.70f, sizeDp = 48f),
         PadElement(type = ElementType.BUTTON, label = "B",
             action = PadAction.key(KeyEvent.KEYCODE_K, "K"),
-            posX = 0.70f, posY = 0.80f, sizeDp = 48f)
+            posX = 0.70f, posY = 0.80f, sizeDp = 48f),
+        PadElement(type = ElementType.TOUCHPAD, label = "鼠标触控板",
+            posX = 0.50f, posY = 0.48f, sizeDp = 150f)
     )
 
     // ============================================================
@@ -353,6 +357,14 @@ object GamepadController {
             // 的自定布局不受影响。
             if (isLegacyDefaultLayout(list)) {
                 elements = if (list.size == 3) simpleLayout() else classicLayout()
+            } else if (elements.none { it.type == ElementType.TOUCHPAD }) {
+                elements = elements + PadElement(
+                    type = ElementType.TOUCHPAD,
+                    label = "鼠标触控板",
+                    posX = 0.50f,
+                    posY = 0.48f,
+                    sizeDp = 150f
+                )
             }
         }
     }
@@ -368,10 +380,10 @@ object GamepadController {
         fun legacy(sizes: FloatArray, base: List<PadElement>): List<PadElement> =
             base.mapIndexed { i, e -> e.copy(sizeDp = sizes[i]) }
         val candidates = listOf(
-            legacy(floatArrayOf(150f, 120f, 62f, 62f, 62f, 62f, 56f, 56f, 48f), classicLayout()),
-            legacy(floatArrayOf(76f, 60f, 32f, 32f, 32f, 32f, 28f, 28f, 26f), classicLayout()),
-            legacy(floatArrayOf(140f, 72f, 72f), simpleLayout()),
-            legacy(floatArrayOf(70f, 36f, 36f), simpleLayout())
+            legacy(floatArrayOf(150f, 120f, 62f, 62f, 62f, 62f, 56f, 56f, 48f), classicLayout().dropLast(1)),
+            legacy(floatArrayOf(76f, 60f, 32f, 32f, 32f, 32f, 28f, 28f, 26f), classicLayout().dropLast(1)),
+            legacy(floatArrayOf(140f, 72f, 72f), simpleLayout().dropLast(1)),
+            legacy(floatArrayOf(70f, 36f, 36f), simpleLayout().dropLast(1))
         )
         return candidates.any { def ->
             def.size == list.size && def.indices.all { i ->
@@ -419,6 +431,7 @@ object GamepadController {
     /** 当前接收按键的 WebView（浏览器活动标签注册） */
     @Volatile
     private var targetWebView: WeakReference<WebView>? = null
+    private val heldMouseButtons = linkedSetOf<Int>()
 
     // ============================================================
     // 按键状态跟踪（v2.15.3 防联键核心）
@@ -447,6 +460,8 @@ object GamepadController {
             targetWebView = null
         }
     }
+
+    fun activeWebView(): WebView? = targetWebView?.get()
 
     /**
      * 底层派发：原始 keydown/keyup 事件。
@@ -511,15 +526,9 @@ object GamepadController {
         val wv = targetWebView?.get() ?: return
         // 位置：优先虚拟鼠标指针（根坐标），换算到 WebView 本地坐标
         val pos = com.linbox.core.input.MouseController.position
-        val loc = IntArray(2)
-        runCatching { wv.getLocationOnScreen(loc) }
-        var x = pos.x - loc[0]
-        var y = pos.y - loc[1]
-        if (x < 0 || y < 0 || x > wv.width || y > wv.height) {
-            // 指针不在 WebView 内 → 使用视图中心
-            x = wv.width / 2f
-            y = wv.height / 2f
-        }
+        val point = webClientPoint(wv, pos.x, pos.y)
+        val x = point.x
+        val y = point.y
         val js = when (mouseCode) {
             PadAction.MOUSE_LEFT -> mouseJs(x, y, 0)
             PadAction.MOUSE_RIGHT -> mouseJs(x, y, 2) + contextMenuJs(x, y)
@@ -530,6 +539,63 @@ object GamepadController {
         }
         runCatching { wv.evaluateJavascript(js, null) }
     }
+
+    fun dispatchMouseMove(x: Float, y: Float) {
+        val wv = targetWebView?.get() ?: return
+        val point = webClientPoint(wv, x, y)
+        val buttons = heldMouseButtons.fold(0) { mask, button -> mask or buttonMask(button) }
+        runCatching { wv.evaluateJavascript(mouseMoveJs(point.x, point.y, buttons), null) }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun webClientPoint(wv: WebView, rootX: Float, rootY: Float): android.graphics.PointF {
+        val viewLocation = IntArray(2)
+        val rootLocation = IntArray(2)
+        wv.getLocationInWindow(viewLocation)
+        wv.rootView.getLocationInWindow(rootLocation)
+        val scale = wv.scale.takeIf { it > 0f } ?: 1f
+        return android.graphics.PointF(
+            (rootX + rootLocation[0] - viewLocation[0]).coerceIn(0f, wv.width.toFloat()) / scale,
+            (rootY + rootLocation[1] - viewLocation[1]).coerceIn(0f, wv.height.toFloat()) / scale
+        )
+    }
+
+    private fun mouseMoveJs(x: Float, y: Float, buttons: Int): String = """
+        (function(){
+          var held=window.__linboxMouseButtons&&Object.keys(window.__linboxMouseButtons).length>0;
+          var el=(held&&window.__linboxMouseTarget)||document.elementFromPoint($x,$y)||document;
+          el.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,composed:true,
+            view:window,clientX:$x,clientY:$y,screenX:$x,screenY:$y,button:-1,buttons:$buttons}));
+        })();
+    """.trimIndent()
+
+    private fun mouseDownJs(x: Float, y: Float, button: Int, buttons: Int): String = """
+        (function(){
+          var el=document.elementFromPoint($x,$y)||document;
+          window.__linboxMouseButtons=window.__linboxMouseButtons||{};
+          window.__linboxMouseButtons[$button]=true;
+          window.__linboxMouseTarget=el;
+          window.__linboxMouseDownPoint=window.__linboxMouseDownPoint||{};
+          window.__linboxMouseDownPoint[$button]={x:$x,y:$y};
+          el.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,composed:true,view:window,
+          clientX:$x,clientY:$y,screenX:$x,screenY:$y,button:$button,buttons:$buttons}));
+        })();
+    """.trimIndent()
+
+    private fun mouseUpJs(x: Float, y: Float, button: Int, buttons: Int): String = """
+        (function(){
+          var el=window.__linboxMouseTarget||document.elementFromPoint($x,$y)||document;
+          el.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,composed:true,view:window,
+          clientX:$x,clientY:$y,screenX:$x,screenY:$y,button:$button,buttons:$buttons}));
+          var start=window.__linboxMouseDownPoint&&window.__linboxMouseDownPoint[$button];
+          if(start&&Math.hypot($x-start.x,$y-start.y)<=8){
+            el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,composed:true,view:window,
+              clientX:$x,clientY:$y,screenX:$x,screenY:$y,button:$button,buttons:0}));
+          }
+          if(window.__linboxMouseButtons){delete window.__linboxMouseButtons[$button];if(!Object.keys(window.__linboxMouseButtons).length)window.__linboxMouseTarget=null;}
+          if(window.__linboxMouseDownPoint)delete window.__linboxMouseDownPoint[$button];
+        })();
+    """.trimIndent()
 
     private fun mouseJs(x: Float, y: Float, button: Int): String = """
         (function(){
@@ -581,16 +647,45 @@ object GamepadController {
     /** 按下鼠标键（独立版无 X11 路由，恒 false = 走 dispatchMouse JS 路径） */
     @Suppress("UNUSED_PARAMETER")
     fun pressMouseButton(actionCode: Int): Boolean {
-        return false
+        val button = when (actionCode) {
+            PadAction.MOUSE_LEFT -> 0
+            PadAction.MOUSE_MIDDLE -> 1
+            PadAction.MOUSE_RIGHT -> 2
+            else -> return false
+        }
+        if (heldMouseButtons.add(button)) dispatchHeldMouseButton(button, true)
+        return true
     }
 
-    /** 抬起鼠标键（JS 路径即时点击语义，无需配对抬起） */
-    @Suppress("UNUSED_PARAMETER")
     fun releaseMouseButton(actionCode: Int) {
+        val button = when (actionCode) {
+            PadAction.MOUSE_LEFT -> 0
+            PadAction.MOUSE_MIDDLE -> 1
+            PadAction.MOUSE_RIGHT -> 2
+            else -> return
+        }
+        if (heldMouseButtons.remove(button)) dispatchHeldMouseButton(button, false)
     }
 
-    /** 一键释放全部按下的鼠标键（保留契约，独立版空操作） */
     fun releaseAllMouseButtons() {
+        heldMouseButtons.toList().forEach(::releaseMouseButton)
+    }
+
+    private fun buttonMask(button: Int): Int = when (button) {
+        0 -> 1
+        1 -> 4
+        2 -> 2
+        else -> 0
+    }
+
+    private fun dispatchHeldMouseButton(button: Int, down: Boolean) {
+        val wv = targetWebView?.get() ?: return
+        val position = com.linbox.core.input.MouseController.position
+        val point = webClientPoint(wv, position.x, position.y)
+        val buttons = heldMouseButtons.fold(0) { mask, held -> mask or buttonMask(held) }
+        val script = if (down) mouseDownJs(point.x, point.y, button, buttons)
+        else mouseUpJs(point.x, point.y, button, buttons)
+        runCatching { wv.evaluateJavascript(script, null) }
     }
 
     /** 按钮按下 */

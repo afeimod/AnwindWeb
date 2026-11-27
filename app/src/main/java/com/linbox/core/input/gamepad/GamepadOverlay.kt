@@ -1,5 +1,9 @@
 package com.linbox.core.input.gamepad
 
+import android.os.Handler
+import android.os.Looper
+import android.view.ViewConfiguration
+import android.view.MotionEvent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -15,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
@@ -29,6 +34,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
@@ -36,9 +42,12 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.linbox.LinBoxApp
+import com.linbox.core.input.MouseController
+import com.linbox.core.input.TrackpadController
 import com.linbox.core.input.TrackpadRouter
 import com.linbox.core.input.boundsInWindowCompat
 import kotlinx.coroutines.flow.first
@@ -88,6 +97,8 @@ fun GamepadOverlay() {
 fun GamepadOverlayContent() {
     val app = LinBoxApp.get()
     val gamepadEnabled by app.settingsStore.gamepadEnabled.collectAsState(initial = false)
+    val mouseCursorEnabled by app.settingsStore.mouseCursorEnabled.collectAsState(initial = true)
+    val mouseControlMode by app.settingsStore.mouseControlMode.collectAsState(initial = "touch")
     if (!gamepadEnabled) return
 
     // v5.0（用户：“修复虚拟手柄悬浮球无法正常调用虚拟手柄开关”）：
@@ -159,6 +170,14 @@ fun GamepadOverlayContent() {
                     }
                 ) { editBlocked ->
                     when (element.type) {
+                        GamepadController.ElementType.TOUCHPAD -> {
+                            if (editBlocked || mouseCursorEnabled && mouseControlMode == "trackpad") {
+                                MouseTouchpadContent(
+                                    element = element,
+                                    inputEnabled = !editBlocked && mouseCursorEnabled && mouseControlMode == "trackpad"
+                                )
+                            }
+                        }
                         GamepadController.ElementType.JOYSTICK -> JoystickContent(
                             element = element,
                             inputEnabled = !editBlocked
@@ -313,8 +332,131 @@ private fun GamepadElementHost(
 }
 
 // ============================================================
-// 摇杆
+// 鼠标触控板
 // ============================================================
+
+@Composable
+@OptIn(ExperimentalComposeUiApi::class)
+private fun MouseTouchpadContent(element: GamepadController.PadElement, inputEnabled: Boolean) {
+    val density = LocalDensity.current
+    val mouseMode by LinBoxApp.get().settingsStore.mouseControlMode.collectAsState(initial = "touch")
+    val enabled = inputEnabled && mouseMode == "trackpad"
+    val longPressHandler = remember { Handler(Looper.getMainLooper()) }
+    var downAt by remember(element.id) { mutableLongStateOf(0L) }
+    var moved by remember(element.id) { mutableStateOf(false) }
+    var dragging by remember(element.id) { mutableStateOf(false) }
+    var lastX by remember(element.id) { mutableFloatStateOf(0f) }
+    var lastY by remember(element.id) { mutableFloatStateOf(0f) }
+    var trackpadPointerId by remember(element.id) { mutableIntStateOf(-1) }
+    val startDrag = remember(element.id) {
+        Runnable {
+            if (enabled && downAt != 0L && !moved) {
+                GamepadController.activeWebView()?.let { target ->
+                    val point = cursorPointInWebView(MouseController.position, target)
+                    TrackpadController.pressHeldMouseButton(target, point.x, point.y, MotionEvent.BUTTON_PRIMARY)
+                    MouseController.press(true)
+                    dragging = true
+                }
+            }
+        }
+    }
+    Box(
+        Modifier.fillMaxSize()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0x5549B6F0))
+            .border(1.5.dp, Color(0xCC7DD3FC), RoundedCornerShape(14.dp))
+            .pointerInteropFilter { event ->
+                if (!enabled) return@pointerInteropFilter false
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                        val index = event.actionIndex
+                        trackpadPointerId = event.getPointerId(index)
+                        downAt = event.eventTime
+                        moved = false
+                        dragging = false
+                        lastX = event.getX(index)
+                        lastY = event.getY(index)
+                        longPressHandler.removeCallbacks(startDrag)
+                        longPressHandler.postDelayed(startDrag, ViewConfiguration.getLongPressTimeout().toLong())
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val index = event.findPointerIndex(trackpadPointerId)
+                        if (index < 0) return@pointerInteropFilter true
+                        val pointerX = event.getX(index)
+                        val pointerY = event.getY(index)
+                        val deltaX = pointerX - lastX
+                        val deltaY = pointerY - lastY
+                        lastX = pointerX
+                        lastY = pointerY
+                        if (deltaX != 0f || deltaY != 0f) {
+                            moved = true
+                            val factor = (4f * 150f / element.sizeDp).coerceIn(2f, 6f)
+                            val next = Offset(
+                                (MouseController.position.x + deltaX * factor).coerceIn(0f, MouseController.boundsWidth),
+                                (MouseController.position.y + deltaY * factor).coerceIn(0f, MouseController.boundsHeight)
+                            )
+                            MouseController.update(next.x, next.y)
+                            GamepadController.dispatchMouseMove(next.x, next.y)
+                            if (MouseController.pressed) MouseController.update(next.x, next.y)
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_POINTER_UP -> {
+                        if (event.getPointerId(event.actionIndex) == trackpadPointerId) {
+                            longPressHandler.removeCallbacks(startDrag)
+                            if (dragging) {
+                                GamepadController.activeWebView()?.let { target ->
+                                    val point = cursorPointInWebView(MouseController.position, target)
+                                    TrackpadController.releaseHeldMouseButton(target, point.x, point.y, MotionEvent.BUTTON_PRIMARY)
+                                }
+                                MouseController.press(false)
+                            }
+                            trackpadPointerId = -1
+                            downAt = 0L
+                            moved = false
+                            dragging = false
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        longPressHandler.removeCallbacks(startDrag)
+                        GamepadController.activeWebView()?.let { target ->
+                            val point = cursorPointInWebView(MouseController.position, target)
+                            when {
+                                dragging -> {
+                                    TrackpadController.releaseHeldMouseButton(target, point.x, point.y, MotionEvent.BUTTON_PRIMARY)
+                                    MouseController.press(false)
+                                }
+                                !moved && event.actionMasked == MotionEvent.ACTION_UP -> {
+                                    TrackpadController.injectMouseClick(target, point.x, point.y)
+                                    MouseController.flash()
+                                }
+                            }
+                        }
+                        downAt = 0L
+                        moved = false
+                        dragging = false
+                        trackpadPointerId = -1
+                        true
+                    }
+                    else -> true
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Text("触控板", color = Color.White.copy(alpha = .75f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+private fun cursorPointInWebView(cursor: Offset, target: android.webkit.WebView): Offset {
+    val location = IntArray(2)
+    target.getLocationInWindow(location)
+    return Offset(
+        (cursor.x - location[0]).coerceIn(0f, target.width.toFloat()),
+        (cursor.y - location[1]).coerceIn(0f, target.height.toFloat())
+    )
+}
 
 /**
  * 摇杆内容：外环（玻璃质感 + 青色描边）+ 8 向指示灯 + 渐变摇杆头。

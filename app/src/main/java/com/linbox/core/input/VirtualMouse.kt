@@ -24,7 +24,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import com.linbox.LinBoxApp
 import kotlin.math.roundToInt
 
 /**
@@ -55,6 +54,17 @@ object MouseController {
     /** 是否已初始化过位置（首次进入桌面时放到屏幕中央偏上） */
     var initialized by mutableStateOf(false)
         private set
+
+    var boundsWidth by mutableStateOf(0f)
+        private set
+    var boundsHeight by mutableStateOf(0f)
+        private set
+
+    fun setBounds(width: Float, height: Float) {
+        boundsWidth = width
+        boundsHeight = height
+        if (initialized) update(position.x.coerceIn(0f, width), position.y.coerceIn(0f, height))
+    }
 
     private var pressStartMs = 0L
     private var pressStartPos = Offset.Zero
@@ -160,15 +170,13 @@ internal fun DrawScope.drawCursor(path: Path, theme: MouseCursorTheme, strokePx:
  * 仅按 MouseController.position 渲染指针 + 点击涟漪。
  */
 @Composable
-fun MouseCursorOverlay() {
-    val app = LinBoxApp.get()
-    val enabled by app.settingsStore.mouseCursorEnabled.collectAsState(initial = true)
-    // v2.19：触控板模式下指针就是鼠标本体，强制显示
-    val controlMode by app.settingsStore.mouseControlMode.collectAsState(initial = "touch")
+fun MouseCursorOverlay(forceHidden: Boolean = false) {
+    val app = com.linbox.LinBoxApp.get()
+    val cursorEnabled by app.settingsStore.mouseCursorEnabled.collectAsState(initial = true)
     val themeId by app.settingsStore.mouseCursorTheme.collectAsState(initial = "white")
     val sizeDp by app.settingsStore.mouseCursorSize.collectAsState(initial = 26f)
 
-    if ((!enabled && controlMode != "trackpad") || !MouseController.initialized) return
+    if (forceHidden || !cursorEnabled || !MouseController.initialized) return
 
     val theme = remember(themeId) { cursorThemeOf(themeId) }
     val density = LocalDensity.current

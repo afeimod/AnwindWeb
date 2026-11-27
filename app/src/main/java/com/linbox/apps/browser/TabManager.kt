@@ -82,6 +82,12 @@ class BrowserTab(
      * 触发 update 块的 loadUrl。注意：委托属性必须在类体（构造参数
      * 不支持 by 委托）。
      */
+    var pageActive: Boolean = false
+    var browserMode: String = "default"
+    var appliedUaMode: String = "desktop"
+    var browserModeReloadPending: Boolean = false
+    internal var removeFlashScript: (() -> Unit)? = null
+    internal val flashDiagnostics = FlashDiagnostics()
     var canGoBack by mutableStateOf(false)
     var canGoForward by mutableStateOf(false)
 
@@ -152,6 +158,7 @@ class TabManager {
 
     /** 当前 UA 模式（"desktop" / "mobile"），由 BrowserContent 同步，供弹窗 WebView 创建时使用 */
     internal var uaMode: String = "desktop"
+    internal var browserMode: String = "default"
 
     fun getTab(id: String?): BrowserTab? = _tabs.firstOrNull { it.id == id }
 
@@ -214,6 +221,8 @@ class TabManager {
      */
     fun closeTab(id: String) {
         val tab = getTab(id) ?: return
+        val closedIndex = _tabs.indexOf(tab)
+        val wasActive = activeTabId == id
         tab.destroyPending = true
         _tabs.remove(tab)
         val wv = tab.webView
@@ -233,11 +242,11 @@ class TabManager {
             _tabs.add(home)
             activeTabId = home.id
             addressInput = ""
-        } else if (activeTabId == id) {
-            val next = _tabs.lastOrNull() ?: _tabs.firstOrNull()
-            activeTabId = next?.id
-            addressInput = when (next?.url) {
-                null, "", "linbox://home", "about:blank" -> ""
+        } else if (wasActive) {
+            val next = _tabs[(closedIndex - 1).coerceAtLeast(0).coerceAtMost(_tabs.lastIndex)]
+            activeTabId = next.id
+            addressInput = when (next.url) {
+                "", "linbox://home", "about:blank" -> ""
                 else -> next.url
             }
         }

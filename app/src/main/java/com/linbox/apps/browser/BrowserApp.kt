@@ -57,7 +57,7 @@ import kotlinx.coroutines.withContext
  * - 多标签页（TabManager，标签专属 WebView 常驻缓存，切换不重建）
  * - 前进/后退/刷新/主页
  * - 地址栏（自动补全 https://）
- * - 本地 HTML 文件读取（通过 SAF 选择文件）
+ * - 本地 SWF 文件和配套资源目录读取（通过 SAF 选择）
  * - 书签管理（持久化到 Room）
  * - 历史记录（持久化到 Room）
  * - 首页快捷导航（百度/B站/GitHub/必应等）
@@ -114,6 +114,118 @@ internal fun BrowserContent(scope: WindowContentScope) {
     val tabManager = remember(scope.windowState.id) {
         BrowserSessions.getOrCreate(scope.windowState.id)
     }
+    var flashInfo by remember { mutableStateOf<String?>(null) }
+    fun showFlashInfo() {
+        val tab = tabManager.activeTab() ?: return
+        val engine = androidx.webkit.WebViewCompat.getCurrentWebViewPackage(context)?.versionName ?: "未知"
+        flashInfo = "WebView：$engine\n${tab.flashDiagnostics.snapshot()}"
+        val requestId = java.util.UUID.randomUUID().toString()
+        tab.webView?.evaluateJavascript("window.__linboxRequestFlashDiagnostics&&window.__linboxRequestFlashDiagnostics('$requestId');", null)
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (flashInfo == null || tab.webView == null) return@postDelayed
+            tab.webView?.evaluateJavascript("JSON.stringify(window.__linboxFlashDiagnostics&&window.__linboxFlashDiagnostics['$requestId']||[])") { value ->
+                val detailText = runCatching {
+                    val parsed = org.json.JSONTokener(value ?: "null").nextValue() as? String ?: "[]"
+                    val frames = org.json.JSONArray(parsed)
+                    buildList {
+                        for (i in 0 until frames.length()) {
+                            val frame = frames.optJSONObject(i) ?: continue
+                            val host = frame.optString("host", "未知主机").take(253)
+                            val players = frame.optJSONArray("players") ?: continue
+                            if (players.length() == 0) add("Frame $host：没有检测到 Flash 播放器")
+                            for (j in 0 until players.length()) {
+                                val player = players.optJSONObject(j) ?: continue
+                                val state = player.optInt("state", -1)
+                                val status = when (state) {
+                                    2 -> "SWF 已读取"
+                                    1 -> "播放器初始化中"
+                                    else -> "播放器状态 $state"
+                                }
+                                val width = player.optInt("width", 0)
+                                val height = player.optInt("height", 0)
+                                if (width > 0 && height > 0) {
+                                    val type = if (player.optBoolean("as3")) "AS3" else "AS2"
+                                    add("Frame $host：$status；$type SWF ${player.optInt("swfVersion")}；${width}×${height}；${player.optInt("frameRate")}fps；播放 ${player.optBoolean("playing")}")
+                                } else add("Frame $host：$status；正在等待 SWF 元数据")
+                            }
+                        }
+                    }.ifEmpty { listOf("未检测到主框架或 iframe 播放器。请结合下面的 CORS 和资源错误记录；资源仍在加载时稍后重试。") }.joinToString("\\n")
+                }.getOrElse { "iframe 诊断暂不可用：${it.javaClass.simpleName}" }
+                if (flashInfo != null) flashInfo = "浏览模式：${when (tabManager.browserMode) { "compatibility" -> "IE11 兼容仿真"; "speed" -> "极速"; else -> "默认" }}\nWebView：$engine\n${tab.flashDiagnostics.snapshot()}\n\n$detailText"
+            }
+        }, 1500)
+    }
+    flashInfo?.let { info ->
+        AlertDialog(
+            onDismissRequest = { flashInfo = null },
+            title = { Text("Flash 运行与渲染") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(info)
+                    Spacer(Modifier.height(12.dp))
+                    Text("此面板只报告 Ruffle 实际渲染后端。IE11 兼容模式只模拟 UA 与少量 IE 特征，不是 Trident 内核，也不支持 ActiveX。")
+                }
+            },
+            confirmButton = { TextButton(onClick = { flashInfo = null }) { Text("关闭") } },
+            dismissButton = {
+                TextButton(onClick = {
+                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Flash 运行信息", info))
+                }) { Text("复制信息") }
+            }
+        )
+    }
+    var localGames by remember { mutableStateOf<List<LocalFlashStore.Game>>(emptyList()) }
+    var localFlashError by remember { mutableStateOf<String?>(null) }
+    val swfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope0.launch {
+            try {
+                val game = withContext(Dispatchers.IO) { LocalFlashStore.openFile(context, uri) }
+                tabManager.openTab(game.url)
+            } catch (error: Exception) {
+                localFlashError = error.message ?: "无法打开 SWF 文件"
+            }
+        }
+    }
+    val swfDirectoryPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) scope0.launch {
+            try {
+                val games = withContext(Dispatchers.IO) { LocalFlashStore.openDirectory(context, uri) }
+                when (games.size) {
+                    0 -> localFlashError = "所选目录没有 SWF 文件"
+                    1 -> tabManager.openTab(games.first().url)
+                    else -> localGames = games
+                }
+            } catch (error: Exception) {
+                localFlashError = error.message ?: "无法读取游戏目录"
+            }
+        }
+    }
+    if (localGames.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { localGames = emptyList() },
+            title = { Text("选择入口 SWF") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text("配套文件按原目录结构读取，请选择游戏主文件。")
+                    localGames.forEach { game ->
+                        TextButton(onClick = { tabManager.openTab(game.url); localGames = emptyList() }) {
+                            Text(game.name)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { localGames = emptyList() }) { Text("取消") } }
+        )
+    }
+    localFlashError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { localFlashError = null },
+            title = { Text("本地 Flash") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { localFlashError = null }) { Text("确定") } }
+        )
+    }
     // 窗口真正关闭时销毁全部 WebView（修复"关了浏览器还在响"复发）；
     // 注意不能挂在 onDispose 上 —— 最小化也会触发 onDispose
     DisposableEffect(scope.windowState.id) {
@@ -123,7 +235,17 @@ internal fun BrowserContent(scope: WindowContentScope) {
 
     // 桌面/手机模式（持久化，切换后立即重载当前页生效）
     val uaMode by app.settingsStore.browserUaMode.collectAsState(initial = "desktop")
-    SideEffect { tabManager.uaMode = uaMode }
+    val browserMode by app.settingsStore.browserPerformanceMode.collectAsState(initial = "default")
+    SideEffect {
+        tabManager.uaMode = uaMode
+        tabManager.browserMode = browserMode
+    }
+    LaunchedEffect(browserMode, uaMode) {
+        tabManager.tabs.forEach { BrowserEngine.applyBrowserMode(it, tabManager) }
+    }
+    fun setBrowserMode(mode: String) {
+        scope0.launch { app.settingsStore.setBrowserPerformanceMode(mode) }
+    }
     fun toggleUaMode() {
         val next = if (uaMode == "desktop") "mobile" else "desktop"
         scope0.launch { app.settingsStore.setBrowserUaMode(next) }
@@ -169,6 +291,18 @@ internal fun BrowserContent(scope: WindowContentScope) {
 
     // 用户设置的主页（默认 LinBox 速度页 linbox://home）
     val defaultHome by app.settingsStore.defaultBrowserHome.collectAsState(initial = "linbox://home")
+    fun navigateBack() {
+        val tab = tabManager.activeTab() ?: return
+        when {
+            tab.webView?.canGoBack() == true -> tab.goBack()
+            tabManager.tabs.size > 1 -> tabManager.closeTab(tab.id)
+            tab.url != defaultHome -> {
+                tab.loadUrl(defaultHome)
+                tabManager.addressInput = if (defaultHome == "linbox://home") "" else defaultHome
+            }
+            else -> (context as? android.app.Activity)?.finish()
+        }
+    }
     val activeUrl = tabManager.activeTab()?.url.orEmpty()
     val currentBookmarkFlow = remember(activeUrl) { app.database.bookmarkDao().observeByUrl(activeUrl) }
     val currentBookmark by currentBookmarkFlow.collectAsState(initial = null)
@@ -233,6 +367,9 @@ internal fun BrowserContent(scope: WindowContentScope) {
     BackHandler(enabled = isFullscreen) {
         toggleFullscreen()
     }
+    BackHandler(enabled = !isFullscreen && !inVideoFullscreen) {
+        navigateBack()
+    }
 
     // v6.5：自定义背景启用时窗口底半透明 —— 背景图透出（内容色/字色不变，
     // 可读性优先）
@@ -288,11 +425,12 @@ internal fun BrowserContent(scope: WindowContentScope) {
             // 组经此投递；ua/全屏状态变化时重注册（标签实时刷新）。注意放在
             // !isFullscreen 条件块之外：真全屏时工具条隐藏，悬浮球是这些动作的
             // 唯一入口，总线不能随工具条一起注销。
-            DisposableEffect(uaMode, isFullscreen) {
+            DisposableEffect(uaMode, browserMode, isFullscreen) {
                 BrowserQuickBus.register(
                     uaDesktop = uaMode == "desktop",
+                    browserMode = browserMode,
                     fs = isFullscreen,
-                    onBack = { tabManager.getTab(tabManager.activeTabId)?.goBack() },
+                    onBack = { navigateBack() },
                     onForward = { tabManager.getTab(tabManager.activeTabId)?.goForward() },
                     onRefresh = { tabManager.getTab(tabManager.activeTabId)?.refresh() },
                     onHome = {
@@ -300,16 +438,33 @@ internal fun BrowserContent(scope: WindowContentScope) {
                         tabManager.addressInput = if (defaultHome == "linbox://home") "" else defaultHome
                     },
                     onToggleUa = { toggleUaMode() },
+                    onSetBrowserMode = { setBrowserMode(it) },
                     onToggleFs = { toggleFullscreen() },
                     onShowBookmarks = { showBookmarks = !showBookmarks },
                     onShowHistory = { showHistory = !showHistory },
+                    onShowTabs = { showTabSwitcher = true },
+                    onFlashInfo = { showFlashInfo() },
+                    onOpenSwf = { swfPicker.launch(arrayOf("*/*")) },
+                    onOpenSwfDirectory = { swfDirectoryPicker.launch(null) },
+                    onPickBackground = { HomeBgManager.pick() },
+                    onClearBackground = { HomeBgManager.clear() },
                     onToggleView3d = { showView3dSettings = true },
                     onOpenSniffer = { com.linbox.apps.browser.ResourceSnifferPanelBus.open() },
+                    onShowSystemKeyboard = {
+                        tabManager.activeTab()?.webView?.let { webView ->
+                            webView.requestFocus()
+                            val inputMethod = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                            webView.post {
+                                inputMethod.showSoftInput(webView, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                            }
+                        }
+                    },
                     onBookmark = toggleCurrentBookmark,
                     // LinBrowser 独立版：悬浮球「关闭浏览器」→ 收起应用回桌面
                     //（标签会话跨进出存活，再进不丢）
                     onExit = {
-                        (context as? android.app.Activity)?.moveTaskToBack(true)
+                        BrowserSessions.destroy(scope.windowState.id)
+                        (context as? android.app.Activity)?.finishAndRemoveTask()
                     }
                 )
                 onDispose { BrowserQuickBus.unregister() }
@@ -376,20 +531,12 @@ internal fun BrowserContent(scope: WindowContentScope) {
             // ===== 竖屏浏览器底部导航 =====
             if (!isFullscreen && !isLandscape) {
                 BrowserBottomBar(
-                    canGoBack = tabManager.getTab(tabManager.activeTabId)?.let {
-                        it.url.isNotEmpty() && it.url != "linbox://home"
+                    canGoBack = tabManager.activeTab()?.let { tab ->
+                        tab.webView?.canGoBack() == true || tabManager.tabs.size > 1 || tab.url != defaultHome
                     } == true,
                     canGoForward = tabManager.getTab(tabManager.activeTabId)?.canGoForward == true,
                     tabCount = tabManager.tabs.size,
-                    onBack = {
-                        tabManager.getTab(tabManager.activeTabId)?.let { tab ->
-                            if (tab.webView?.canGoBack() == true) tab.goBack()
-                            else {
-                                tab.loadUrl("linbox://home")
-                                tabManager.addressInput = ""
-                            }
-                        }
-                    },
+                    onBack = { navigateBack() },
                     onForward = { tabManager.getTab(tabManager.activeTabId)?.goForward() },
                     onTabs = { showTabSwitcher = true },
                     onMenu = { showBrowserMenu = true },
@@ -415,7 +562,7 @@ internal fun BrowserContent(scope: WindowContentScope) {
                     uaMode = uaMode,
                     fullscreen = isFullscreen,
                     isBookmarked = currentBookmark != null,
-                    onBack = { tabManager.getTab(tabManager.activeTabId)?.goBack(); showBrowserMenu = false },
+                    onBack = { navigateBack(); showBrowserMenu = false },
                     onForward = { tabManager.getTab(tabManager.activeTabId)?.goForward(); showBrowserMenu = false },
                     onRefresh = { tabManager.getTab(tabManager.activeTabId)?.refresh(); showBrowserMenu = false },
                     onHome = {
@@ -429,6 +576,11 @@ internal fun BrowserContent(scope: WindowContentScope) {
                     onHistory = { showBrowserMenu = false; showHistory = true },
                     onToggleUa = { toggleUaMode(); showBrowserMenu = false },
                     onToggleFullscreen = { toggleFullscreen(); showBrowserMenu = false },
+                    browserMode = browserMode,
+                    onBrowserMode = { setBrowserMode(it); showBrowserMenu = false },
+                    onFlashInfo = { showBrowserMenu = false; showFlashInfo() },
+                    onOpenSwf = { showBrowserMenu = false; swfPicker.launch(arrayOf("*/*")) },
+                    onOpenSwfDirectory = { showBrowserMenu = false; swfDirectoryPicker.launch(null) },
                     onSniffer = { com.linbox.apps.browser.ResourceSnifferPanelBus.open(); showBrowserMenu = false },
                     onSettings = { showBrowserMenu = false; showView3dSettings = true },
                     onPickBackground = { HomeBgManager.pick(); showBrowserMenu = false },
@@ -633,6 +785,7 @@ private fun WebViewContainer(
                 // 原生捏合处理，默认排版与 v2.14.4 完全一致（零注入）
                 val zoomLayout = ZoomPinchLayout(ctx)
                 val wv = BrowserEngine.ensureWebView(ctx, tab, tabManager)
+                BrowserEngine.setPageActive(tab, true)
                 zoomLayout.setWebView(wv, tab.viewZoom)
                 // v2.15：注册为虚拟手柄输入目标（显示中的标签即玩家所在页面）
                 com.linbox.core.input.gamepad.GamepadController.attachWebView(wv)
@@ -671,7 +824,7 @@ private fun WebViewContainer(
                     return@AndroidView
                 }
                 // UA 模式切换（当前激活标签实时生效）：设置后立即重载
-                val desiredUa = BrowserEngine.desiredUa(uaMode)
+                val desiredUa = BrowserEngine.desiredUa(uaMode, tabManager.browserMode)
                 if (webview.settings.userAgentString != desiredUa) {
                     try {
                         webview.settings.userAgentString = desiredUa
@@ -694,6 +847,7 @@ private fun WebViewContainer(
                 }
             },
             onRelease = { zoomLayout ->
+                BrowserEngine.setPageActive(tab, false)
                 // 解除容器对 WebView 的引用（WebView 生命周期由引擎管理）
                 zoomLayout.detachWebView()
                 // 虚拟手柄：解除输入目标注册（v2.15）
@@ -1616,6 +1770,11 @@ private fun BrowserMenuDialog(
     onHistory: () -> Unit,
     onToggleUa: () -> Unit,
     onToggleFullscreen: () -> Unit,
+    browserMode: String,
+    onBrowserMode: (String) -> Unit,
+    onFlashInfo: () -> Unit,
+    onOpenSwf: () -> Unit,
+    onOpenSwfDirectory: () -> Unit,
     onSniffer: () -> Unit,
     onSettings: () -> Unit,
     onPickBackground: () -> Unit,
@@ -1633,8 +1792,17 @@ private fun BrowserMenuDialog(
         Triple("书签", Icons.Default.Bookmark, onBookmarks),
         Triple(if (isBookmarked) "取消收藏当前页" else "收藏当前页", Icons.Default.Star, onBookmarkCurrent),
         Triple("历史记录", Icons.Default.History, onHistory),
+        Triple("浏览模式：${when (browserMode) { "compatibility" -> "IE11 兼容"; "speed" -> "极速"; else -> "默认" }}", Icons.Default.Speed, {
+            val next = when (browserMode) { "default" -> "compatibility"; "compatibility" -> "speed"; else -> "default" }
+            onBrowserMode(next)
+            Unit
+        }),
         Triple(if (uaMode == "desktop") "手机模式" else "桌面模式", Icons.Default.Devices, onToggleUa),
         Triple(if (fullscreen) "退出全屏" else "全屏", Icons.Default.Fullscreen, onToggleFullscreen),
+        Triple("调用手机键盘", Icons.Default.Keyboard, { com.linbox.apps.browser.BrowserQuickBus.showSystemKeyboard?.invoke(); Unit }),
+        Triple("Flash 运行诊断", Icons.Default.BugReport, onFlashInfo),
+        Triple("打开本地 SWF", Icons.AutoMirrored.Filled.InsertDriveFile, onOpenSwf),
+        Triple("打开 SWF 资源目录", Icons.Default.FolderOpen, onOpenSwfDirectory),
         Triple("资源嗅探", Icons.Default.WifiTethering, onSniffer),
         Triple("3D 视角设置", Icons.Default.Settings, onSettings),
         Triple("设置背景", Icons.Default.Wallpaper, onPickBackground),
@@ -1754,6 +1922,7 @@ object BrowserQuickBus {
         private set
 
     var uaIsDesktop by mutableStateOf(true)
+    var browserMode by mutableStateOf("default")
     var fullscreenActive by mutableStateOf(false)
 
     var goBack: (() -> Unit)? = null
@@ -1761,44 +1930,70 @@ object BrowserQuickBus {
     var refresh: (() -> Unit)? = null
     var goHome: (() -> Unit)? = null
     var toggleUaMode: (() -> Unit)? = null
+    var setBrowserMode: ((String) -> Unit)? = null
     var toggleFullscreen: (() -> Unit)? = null
     var showBookmarks: (() -> Unit)? = null
     var showHistory: (() -> Unit)? = null
     var toggleView3d: (() -> Unit)? = null
     /** v1.3.0：打开资源嗅探面板（嗅探 swf/图片/媒体/脚本，勾选批量下载）。 */
     var openSniffer: (() -> Unit)? = null
+    var showSystemKeyboard: (() -> Unit)? = null
+    var showTabs: (() -> Unit)? = null
+    var showFlashInfo: (() -> Unit)? = null
+    var openSwf: (() -> Unit)? = null
+    var openSwfDirectory: (() -> Unit)? = null
+    var pickBackground: (() -> Unit)? = null
+    var clearBackground: (() -> Unit)? = null
     var bookmarkCurrent: (() -> Unit)? = null
     /** LinBrowser 独立版：关闭浏览器（收起应用回桌面，会话存活）。 */
     var exitBrowser: (() -> Unit)? = null
 
     fun register(
         uaDesktop: Boolean,
+        browserMode: String,
         fs: Boolean,
         onBack: () -> Unit,
         onForward: () -> Unit,
         onRefresh: () -> Unit,
         onHome: () -> Unit,
         onToggleUa: () -> Unit,
+        onSetBrowserMode: (String) -> Unit,
         onToggleFs: () -> Unit,
         onShowBookmarks: () -> Unit,
         onShowHistory: () -> Unit,
+        onShowTabs: () -> Unit = {},
+        onFlashInfo: () -> Unit = {},
+        onOpenSwf: () -> Unit = {},
+        onOpenSwfDirectory: () -> Unit = {},
+        onPickBackground: () -> Unit = {},
+        onClearBackground: () -> Unit = {},
         onToggleView3d: () -> Unit,
         onOpenSniffer: () -> Unit = {},
+        onShowSystemKeyboard: () -> Unit = {},
         onBookmark: () -> Unit,
         onExit: () -> Unit = {}
     ) {
         uaIsDesktop = uaDesktop
+        this.browserMode = browserMode
         fullscreenActive = fs
         goBack = onBack
         goForward = onForward
         refresh = onRefresh
         goHome = onHome
         toggleUaMode = onToggleUa
+        setBrowserMode = onSetBrowserMode
         toggleFullscreen = onToggleFs
         showBookmarks = onShowBookmarks
         showHistory = onShowHistory
         toggleView3d = onToggleView3d
         openSniffer = onOpenSniffer
+        showSystemKeyboard = onShowSystemKeyboard
+        showTabs = onShowTabs
+        showFlashInfo = onFlashInfo
+        openSwf = onOpenSwf
+        openSwfDirectory = onOpenSwfDirectory
+        pickBackground = onPickBackground
+        clearBackground = onClearBackground
         bookmarkCurrent = onBookmark
         exitBrowser = onExit
         available = true
@@ -1811,11 +2006,19 @@ object BrowserQuickBus {
         refresh = null
         goHome = null
         toggleUaMode = null
+        setBrowserMode = null
         toggleFullscreen = null
         showBookmarks = null
         showHistory = null
         toggleView3d = null
         openSniffer = null
+        showSystemKeyboard = null
+        showTabs = null
+        showFlashInfo = null
+        openSwf = null
+        openSwfDirectory = null
+        pickBackground = null
+        clearBackground = null
         bookmarkCurrent = null
         exitBrowser = null
     }

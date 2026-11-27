@@ -19,6 +19,7 @@ import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
@@ -34,6 +35,8 @@ import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import com.linbox.LinBoxApp
 import com.linbox.data.db.entity.HistoryEntity
 import kotlinx.coroutines.CoroutineScope
@@ -44,13 +47,6 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.lang.ref.WeakReference
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
-import java.util.concurrent.ConcurrentHashMap
-import javax.net.ssl.HostnameVerifier
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLContext
-import javax.net.ssl.X509TrustManager
 
 /**
  * 浏览器内核引擎：WebView 的创建 / 配置 / 销毁，以及 WebViewClient、WebChromeClient。
@@ -75,9 +71,6 @@ import javax.net.ssl.X509TrustManager
  *    "页面加载完成（有声音/标题）但 Surface 不上屏"的灰屏问题。
  * 2. View Transitions API 补丁：WebView 对 startViewTransition 支持不完善，
  *    SPA 站点会出现回调不执行/页面卡住，polyfill 确保回调同步执行。
- * 3. Flash 游戏兼容（4399 等）：伪造 navigator.plugins 让页面创建 Flash 元素 +
- *    Ruffle polyfill（jsdelivr CDN）替换 <object>/<embed> 为 Canvas 播放器 +
- *    SWF 请求原生拦截（CORS 头 + Cookie 转发 + 防盗链 Referer）。
  * 4. PC 页面 viewport 自适配（无 viewport meta 的页面按 1200px 基准缩放）。
  * 5. 禁用 WebView 算法暗色（MIUI 强制深色不介入网页渲染）。
  *
@@ -109,19 +102,12 @@ import javax.net.ssl.X509TrustManager
  * 但 CDN 上的引擎/子资源 TLS 被掐断（国内网络对 jsdelivr/unpkg 的典型干扰）：
  * 1. Ruffle 引擎全量本地化（本次核心）：5 个文件打包进 assets，经虚拟域
  *    https://linbox.local/ruffle/ 由 shouldInterceptRequest 供给，零 CDN 依赖。
- *    旧版从 jsdelivr 动态加载 —— TLS 被 RST 时 Flash 游戏区永远空白（灰屏
- *    有声音），加载器链上再叠 npmmirror/jsdelivr 两级网络后备。
  * 2. 弹窗 WebView 立即挂载（补齐 v2.14.3 梯子的源头缺口）：onCreateWindow
  *    在 transport 交接【前】就把弹窗 WebView 临时挂到 opener 的视图容器并
  *    手动 measure/layout 成 opener 尺寸 —— Chromium 交接后立即在真实 surface
  *    上开始加载（不再是 0,0-0,0 脱离视图树状态），首帧生产不再落空；Compose
  *    激活新标签时 factory 剥离临时父容器认领。AndroidViewHolder 只测量/布局
  *    自己的 typedView，第二个子 View 必须手动 layout。
- * 3. WebGL 像素管线守卫（HTML5 游戏灰屏兜底）：document-start 探测
- *    clear→readPixels 是否真的产出像素；损坏（上下文创建成功但像素读回全零，
- *    嵌入式合成环境的典型症状：游戏跑着、有声音、画面灰）时让
- *    getContext('webgl') 返回 null —— Ruffle 等引擎自动回退 canvas2d 渲染，
- *    页面自身也有 2D 回退路径，不再卡死在坏掉的 GPU 合成上。
  */
 object BrowserEngine {
 
@@ -137,8 +123,63 @@ object BrowserEngine {
 
     private const val TAG_DESTROYED = "linbox_webview_destroyed"
 
-    fun desiredUa(uaMode: String): String =
-        if (uaMode == "desktop") desktopUserAgent() else (defaultMobileUa ?: DESKTOP_UA)
+    fun desiredUa(uaMode: String, browserMode: String = "default"): String = when (browserMode) {
+        "compatibility" -> IE_COMPAT_UA
+        "speed" -> desktopUserAgent()
+        else -> if (uaMode == "desktop") desktopUserAgent() else (defaultMobileUa ?: DESKTOP_UA)
+    }
+
+    private const val IE_COMPAT_UA =
+        "Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko"
+
+    private const val IE_COMPAT_SCRIPT = """
+        (function(){
+          try { Object.defineProperty(document,'documentMode',{get:function(){return 11;},configurable:true}); } catch(e) {}
+          try { Object.defineProperty(document,'uniqueID',{get:function(){return '_ie_id_';},configurable:true}); } catch(e) {}
+          try { if(!document.all) document.all=document.getElementsByTagName('*'); } catch(e) {}
+        })();
+    """
+
+    private const val DESKTOP_MODE_SCRIPT = """
+        (function(){
+          var firstInstall=!window.__linboxDesktopMode;
+          window.__linboxDesktopMode=true;
+          function setProperty(target,name,value){
+            try{Object.defineProperty(target,name,{get:function(){return value;},configurable:true});}catch(e){}
+          }
+          setProperty(navigator,'platform','Win32');
+          setProperty(navigator,'maxTouchPoints',0);
+          setProperty(screen,'width',1280);
+          setProperty(screen,'availWidth',1280);
+          function applyViewport(){
+            try{
+              var head=document.head||document.documentElement;
+              if(!head)return;
+              var meta=document.querySelector('meta[name="viewport"]');
+              if(!meta){meta=document.createElement('meta');meta.name='viewport';head.appendChild(meta);}
+              var parts=(meta.content||'').split(',').map(function(part){return part.trim();}).filter(function(part){return part&&!/^width\s*=/i.test(part);});
+              parts.unshift('width=1280');
+              var next=parts.join(', ');
+              if(meta.content!==next)meta.content=next;
+            }catch(e){}
+          }
+          applyViewport();
+          if(firstInstall&&window.MutationObserver){
+            var observer=new MutationObserver(function(){applyViewport();watchViewport();});
+            function watchViewport(){
+              observer.disconnect();
+              if(document.head){
+                observer.observe(document.head,{childList:true});
+                var meta=document.querySelector('meta[name="viewport"]');
+                if(meta)observer.observe(meta,{attributes:true,attributeFilter:['content','name']});
+              }else if(document.documentElement){
+                observer.observe(document.documentElement,{childList:true});
+              }
+            }
+            watchViewport();
+          }
+        })();
+    """
 
     private fun desktopUserAgent(): String {
         val chromeVersion = defaultMobileUa
@@ -146,6 +187,63 @@ object BrowserEngine {
             ?.takeIf { it.isNotBlank() }
             ?: DESKTOP_UA.substringAfter("Chrome/").substringBefore(' ')
         return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Safari/537.36"
+    }
+
+    private val flashSource: String by lazy {
+        LinBoxApp.get().assets.open("flash-bootstrap.js").bufferedReader(Charsets.UTF_8).use { it.readText() }
+    }
+
+    internal fun browserBootstrap(browserMode: String): String = composeBrowserBootstrap(browserMode, flashSource)
+
+    internal fun composeBrowserBootstrap(browserMode: String, flashScript: String): String = when (browserMode) {
+        "compatibility" -> IE_COMPAT_SCRIPT + "\n" + DESKTOP_MODE_SCRIPT + "\n" + flashScript
+        "speed" -> DESKTOP_MODE_SCRIPT + "\n" + flashScript
+        else -> flashScript
+    }
+
+    private fun installFlashScript(view: WebView, tab: BrowserTab, browserMode: String) {
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            tab.removeFlashScript?.invoke()
+            val script = WebViewCompat.addDocumentStartJavaScript(view, browserBootstrap(browserMode), setOf("*"))
+            tab.removeFlashScript = { script.remove() }
+        }
+    }
+
+    fun applyBrowserMode(tab: BrowserTab, manager: TabManager) {
+        val changed = tab.browserMode != manager.browserMode || tab.appliedUaMode != manager.uaMode
+        if (!changed) return
+        tab.webView?.let { view ->
+            tab.removeFlashScript?.invoke()
+            installFlashScript(view, tab, manager.browserMode)
+            view.settings.userAgentString = desiredUa(manager.uaMode, manager.browserMode)
+        }
+        if (tab.hasLoadedOnce && !tab.url.startsWith("linbox://") && !tab.url.startsWith("about:")) {
+            if (manager.activeTabId == tab.id) tab.webView?.reload()
+            else tab.browserModeReloadPending = true
+        }
+        tab.browserMode = manager.browserMode
+        tab.appliedUaMode = manager.uaMode
+    }
+
+    fun setPageActive(tab: BrowserTab, active: Boolean) {
+        tab.pageActive = active
+        tab.webView?.let { view ->
+            if (active && tab.browserModeReloadPending) {
+                tab.browserModeReloadPending = false
+                view.reload()
+            }
+            view.evaluateJavascript(
+                "window.__linboxFlashActive=$active;if(window.__linboxSetFlashActive)window.__linboxSetFlashActive($active);",
+                null
+            )
+            if (active) view.onResume() else view.onPause()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                view.setRendererPriorityPolicy(
+                    if (active) WebView.RENDERER_PRIORITY_IMPORTANT else WebView.RENDERER_PRIORITY_BOUND,
+                    !active
+                )
+            }
+        }
     }
 
     /**
@@ -164,7 +262,7 @@ object BrowserEngine {
             // AndroidView 认领前必须剥离旧父容器，否则 holder.addView 抛
             // "The specified child already has a parent"。
             (existing.parent as? ViewGroup)?.removeView(existing)
-            applyUa(existing, manager.uaMode)
+            applyUa(existing, manager.uaMode, manager.browserMode)
             return existing
         }
         val wv = ExposedWebView(context)
@@ -176,8 +274,8 @@ object BrowserEngine {
         return wv
     }
 
-    private fun applyUa(wv: WebView, uaMode: String) {
-        val desired = desiredUa(uaMode)
+    private fun applyUa(wv: WebView, uaMode: String, browserMode: String) {
+        val desired = desiredUa(uaMode, browserMode)
         if (wv.settings.userAgentString != desired) {
             try {
                 wv.settings.userAgentString = desired
@@ -219,7 +317,7 @@ object BrowserEngine {
                 safeBrowsingEnabled = true
             }
             textZoom = 100
-            userAgentString = desiredUa(manager.uaMode)
+            userAgentString = desiredUa(manager.uaMode, manager.browserMode)
         }
 
         // v2.14.3：撤销 v2.14.2 照搬的 setLayerType(LAYER_TYPE_HARDWARE)。
@@ -273,7 +371,7 @@ object BrowserEngine {
         // v2.19：渲染进程优先级拉满 —— 多窗口/多标签场景下 Chromium 可能
         // 因可见性判定降级渲染优先级导致前台滚动卡顿；deferred=false 保持
         // 常驻优先级（配合 largeHeap，多标签内存压力可控）
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching {
                 wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
             }
@@ -412,7 +510,8 @@ object BrowserEngine {
             wv.addJavascriptInterface(MediaContextMenuBridge(manager), "__linboxMediaMenu")
         }
 
-        wv.webViewClient = TabWebViewClient(ctx, tab, manager)
+        val client = TabWebViewClient(ctx, tab, manager)
+        wv.webViewClient = client
         wv.webChromeClient = TabChromeClient(ctx, tab, manager)
 
         // v2.16.3：鼠标视角（3D 视角旋转）JS 桥 —— 页面脚本经
@@ -421,6 +520,9 @@ object BrowserEngine {
         // 参照 GameBox：模拟 Pointer Lock + __cameraRotate 派发）。
         // 桥只暴露只读 pull，无安全面。
         runCatching { wv.addJavascriptInterface(View3dController.bridge, "__linboxLookBridge") }
+        tab.browserMode = manager.browserMode
+        tab.appliedUaMode = manager.uaMode
+        installFlashScript(wv, tab, manager.browserMode)
     }
 
     /**
@@ -508,7 +610,17 @@ object BrowserEngine {
         private val manager: TabManager
     ) : WebViewClient() {
 
+        private val flashResources = FlashResources(ctx, tab.flashDiagnostics)
+        private val flashBootstrapScript: String get() = browserBootstrap(manager.browserMode)
+
         private fun isActive() = manager.activeTabId == tab.id
+
+        override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+            super.doUpdateVisitedHistory(view, url, isReload)
+            tab.canGoBack = view.canGoBack()
+            tab.canGoForward = view.canGoForward()
+            if (isActive()) manager.ui?.onUrlSync(url)
+        }
 
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             val newUrl = request.url.toString()
@@ -524,12 +636,6 @@ object BrowserEngine {
                 }
                 return true
             }
-            // v2.14.2（gamehtml）：直接导航到 .swf 文件 → 不当页面加载，
-            // 用 Ruffle 全屏播放器接管
-            if (newUrl.endsWith(".swf", ignoreCase = true)) {
-                playSwfFullscreen(view, newUrl)
-                return true
-            }
             // 在当前 WebView 内继续加载：登记 lastRequestedUrl 防 update 块重复加载
             tab.lastRequestedUrl = newUrl
             tab.url = newUrl
@@ -541,6 +647,8 @@ object BrowserEngine {
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
             if (url != null) {
+                flashResources.onNavigation(url)
+                tab.flashDiagnostics.clear()
                 // v1.3.0：资源嗅探器跟随主导航（面板标题/目录树置顶当前站）
                 ResourceSniffer.onPageStarted(url)
                 // v2.14.1：同一 https 地址被重新导航（重试/地址栏回车/书签重开）时，
@@ -570,14 +678,17 @@ object BrowserEngine {
                 manager.ui?.onError(null)
             }
 
-            // ===== v2.14.2（gamehtml）页面级注入：在页面自身 JS 之前执行 =====
+            view?.evaluateJavascript(
+                "window.__linboxFlashActive=${tab.pageActive};" + flashBootstrapScript +
+                    ";window.__linboxSetFlashActive(${tab.pageActive});", null
+            )
+
             if (url != null && (url.startsWith("http") || url.startsWith("file:"))) {
-                if (manager.uaMode == "desktop") {
+                if (manager.browserMode == "compatibility") {
+                    view?.evaluateJavascript(IE_COMPAT_SCRIPT + DESKTOP_MODE_SCRIPT, null)
+                } else if (manager.browserMode == "speed" || manager.uaMode == "desktop") {
                     view?.evaluateJavascript(DESKTOP_MODE_SCRIPT, null)
                 }
-                // 0) v2.14.4 WebGL 像素管线守卫：检测到坏上下文时让 webgl
-                //    getContext 返回 null，Ruffle/HTML5 游戏自动回退 canvas2d
-                view?.evaluateJavascript(WEBGL_GUARD_SCRIPT, null)
                 // 1) View Transitions API 补丁（所有页面通用，防 SPA 跳转卡死）
                 view?.evaluateJavascript(VIEW_TRANSITION_PATCH_SCRIPT, null)
                 // 2) PC 页面 viewport 自适配（页面自带 viewport 则不动）。
@@ -587,15 +698,6 @@ object BrowserEngine {
                 //    （v2.14.9：width=原宽/z + 钳制 scale，页面始终精确
                 //    铺满窗口宽）；默认态本脚本不改画布宽、不改默认缩放
                 view?.evaluateJavascript(VIEWPORT_FIT_SCRIPT, null)
-                // 3) Flash 兼容：伪造插件让 4399 等页面创建 <object> Flash 元素（零网络开销）
-                view?.evaluateJavascript(FLASH_FAKE_SUPPORT_SCRIPT, null)
-                //    懒加载探测器：任意页面出现 Flash 元素时动态加载 Ruffle 引擎
-                view?.evaluateJavascript(FLASH_DOM_DETECT_SCRIPT, null)
-                // 4) 4399 系页面：直接预加载 Ruffle（游戏页主体就是 Flash）
-                if (url.contains("4399.com")) {
-                    view?.evaluateJavascript(REFERER_SPOOF_SCRIPT, null)
-                    view?.evaluateJavascript(RUFFLE_LOADER_SCRIPT, null)
-                }
             }
 
             // v2.14.7：导航重置缩小域缩放（30%~100%）—— 每次新页面默认回到
@@ -627,14 +729,21 @@ object BrowserEngine {
 
         override fun onPageFinished(view: WebView?, url: String?) {
             super.onPageFinished(view, url)
+            runCatching { CookieManager.getInstance().flush() }
+            view?.evaluateJavascript(
+                "window.__linboxFlashActive=${tab.pageActive};" + flashBootstrapScript +
+                    ";window.__linboxSetFlashActive(${tab.pageActive});", null
+            )
             view?.let {
                 tab.canGoBack = it.canGoBack()
                 tab.canGoForward = it.canGoForward()
+                if (isActive()) manager.ui?.onUrlSync(it.url.orEmpty())
                 if (url?.startsWith("http") == true || url?.startsWith("file:") == true) {
-                    if (manager.uaMode == "desktop") {
+                    if (manager.browserMode == "compatibility") {
+                        it.evaluateJavascript(IE_COMPAT_SCRIPT + DESKTOP_MODE_SCRIPT, null)
+                    } else if (manager.browserMode == "speed" || manager.uaMode == "desktop") {
                         it.evaluateJavascript(DESKTOP_MODE_SCRIPT, null)
                     }
-                    it.evaluateJavascript(FLASH_DOM_DETECT_SCRIPT, null)
                     it.evaluateJavascript(MEDIA_CONTEXT_MENU_SCRIPT, null)
                 }
             }
@@ -764,6 +873,9 @@ object BrowserEngine {
             error: WebResourceError?
         ) {
             super.onReceivedError(view, request, error)
+            if (request?.isForMainFrame != true) {
+                request?.url?.let { uri -> tab.flashDiagnostics.recordResource(uri, errorType = "WebResourceError", method = request.method) }
+            }
             // 仅主框架错误才处理；忽略 -1（未知/取消）与 DNS 解析失败（WebView 会自行重试）
             if (request?.isForMainFrame == true) {
                 val code = error?.errorCode ?: -1
@@ -775,6 +887,17 @@ object BrowserEngine {
                 }
                 if (isActive() && code != -1 && code != WebViewClient.ERROR_HOST_LOOKUP) {
                     manager.ui?.onError(error?.description?.toString() ?: "加载失败")
+                }
+            }
+        }
+
+        override fun onReceivedHttpError(
+            view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?
+        ) {
+            super.onReceivedHttpError(view, request, errorResponse)
+            if (request?.isForMainFrame != true && (errorResponse?.statusCode ?: 0) >= 400) {
+                request?.url?.let { uri ->
+                    tab.flashDiagnostics.recordResource(uri, status = errorResponse?.statusCode, method = request.method)
                 }
             }
         }
@@ -812,6 +935,7 @@ object BrowserEngine {
             ) {
                 ResourceSniffer.record(snifferUrl)
             }
+            flashResources.intercept(request)?.let { return it }
             // v2.14.4：Ruffle 引擎本地化 —— 虚拟域全部从 assets 供给，
             // 彻底摆脱 jsdelivr/unpkg 在国内网络的 TLS 掐断（日志证据：
             // ssl_client_socket_impl handshake failed net_error -100，
@@ -830,72 +954,7 @@ object BrowserEngine {
                     null
                 }
             }
-            // v2.14.2（gamehtml interceptSwf）：拦截远程 SWF 请求。
-            // Ruffle 以 XHR/fetch 从页面所在域跨域拉取 SWF，必须原生下载并附加
-            // CORS 头 + Cookie 转发 + 防盗链 Referer，否则引擎报跨域/403。
-            // 只拦截真正的 SWF 资源请求（含 4399 的 dw-XX 命名模式），不影响普通浏览。
-            val url = uri.toString()
-            // v1.3.1：以「去查询串的路径」判扩展名，并加误伤防护 ——
-            // 4399 模式里的 "flash20" 会命中站内 player JS（如
-            // flash2023.js 等静态资源），被当 SWF 原生下载并以 swf MIME
-            // 返回 → 页面脚本损坏 → Flash 引导链全灭。明确的静态资源
-            // （js/css/图片/页面）绝不拦截。
-            val urlPath = url.substringBefore('?').substringBefore('#')
-            val definitelyNotSwf = urlPath.endsWith(".js", true) ||
-                urlPath.endsWith(".css", true) ||
-                urlPath.endsWith(".png", true) || urlPath.endsWith(".jpg", true) ||
-                urlPath.endsWith(".jpeg", true) || urlPath.endsWith(".gif", true) ||
-                urlPath.endsWith(".webp", true) || urlPath.endsWith(".html", true) ||
-                urlPath.endsWith(".htm", true)
-            val isSwfRequest = !definitelyNotSwf && (
-                urlPath.endsWith(".swf", ignoreCase = true) ||
-                    url.contains(".swf?", ignoreCase = true) ||
-                    (url.contains("4399.com") &&
-                        (urlPath.contains("/dw-") || url.contains("flash_tm3") ||
-                            url.contains("flash20")))
-                )
-            if (isSwfRequest) {
-                return try {
-                    interceptSwf(url, request)
-                } catch (_: Exception) {
-                    null
-                }
-            }
             return super.shouldInterceptRequest(view, request)
-        }
-
-        /**
-         * v2.14.2（gamehtml playSwfScript）：用 Ruffle 全屏播放器打开 SWF。
-         * 先注入引擎加载器（幂等），就绪后创建 fixed 满屏播放器接管页面。
-         */
-        private fun playSwfFullscreen(view: WebView?, swfUrl: String) {
-            if (view == null || view.tag == TAG_DESTROYED) return
-            val base = try {
-                val u = java.net.URI(swfUrl)
-                "${u.scheme}://${u.host}/"
-            } catch (_: Exception) {
-                null
-            }
-            // 对象字面量插值：base 非空时展开为 , base: 'xxx'（注意是对象属性而非函数实参）
-            val baseArg = base?.let { ", base: '$it'" } ?: ""
-            val js = RUFFLE_LOADER_SCRIPT + "\n" + """
-                (function(){
-                  function go(){
-                    try {
-                      var ruffle = window.RufflePlayer.newest();
-                      if (!ruffle) return;
-                      var player = ruffle.createPlayer();
-                      player.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;z-index:9999;background:#000;';
-                      document.body.appendChild(player);
-                      var opt = { url: '$swfUrl'$baseArg };
-                      player.ruffle().load(opt);
-                    } catch(e) { console.error('[SWF] play error:', e); }
-                  }
-                  if (window.__ruffleLoaded) { go(); return; }
-                  document.addEventListener('ruffleReady', function(){ go(); }, { once: true });
-                })();
-            """.trimIndent()
-            view.evaluateJavascript(js, null)
         }
 
         /**
@@ -924,20 +983,6 @@ object BrowserEngine {
             }
         }
 
-        // ====================================================================
-        // v2.14.2（gamehtml interceptSwf）：SWF 原生下载 + CORS 头 + Cookie 转发
-        // ====================================================================
-        private val swfCache = ConcurrentHashMap<String, ByteArray>()
-
-        /** 统一 CORS 响应头：所有 SWF 拦截响应（成功/失败/预检）都带这些头 */
-        private val swfCorsHeaders = mapOf(
-            "Access-Control-Allow-Origin" to "*",
-            "Access-Control-Allow-Methods" to "GET, POST, OPTIONS, HEAD",
-            "Access-Control-Allow-Headers" to "*",
-            "Content-Type" to "application/x-shockwave-flash",
-            "Cache-Control" to "no-cache"
-        )
-
         /** 本地 Ruffle 资产响应头（CORS + 不缓存，便于版本升级后立即生效） */
         private val ruffleAssetHeaders = mapOf(
             "Access-Control-Allow-Origin" to "*",
@@ -950,14 +995,11 @@ object BrowserEngine {
          * v2.14.4：从 assets/ruffle/ 供给引擎文件。
          * ruffle.js 加载器会按浏览器特性从 publicPath 拉取 core.ruffle.*.js
          * 与 *.wasm（fetch 跨域 → 必须带 CORS 头；wasm 流式编译 → MIME 必须
-         * application/wasm）。文件不存在时返回 404（而非 null），让注入的
-         * 加载器链切换到下一个 CDN 后备源。
+         * application/wasm）。文件不存在时返回 404（而非 null）。
          *
-         * v2.14.5（关键修复）：请求路径形如 /ruffle/<file>（RUFFLE_LOCAL_BASE
-         * 以 /ruffle/ 结尾），旧实现未剥离目录前缀，name 含 '/' 被穿越防护
-         * 全量拒绝 → 本地引擎资产 100% 返回 404 → 链式加载器退回 CDN →
-         * 国内网络 TLS 掐断 → Ruffle 预加载器进度条永远卡住（用户实测
-         * "一直进度条加载"）。与 GameBox 的 interceptAsset 对齐：剥离虚拟
+         * v2.14.5（关键修复）：请求路径形如 /ruffle/<file>，旧实现未剥离
+         * 目录前缀，name 含 '/' 被穿越防护全量拒绝 → 本地引擎资产 100%
+         * 返回 404。与 GameBox 的 interceptAsset 对齐：剥离虚拟
          * 目录前缀后按文件名映射 assets/ruffle/<file>，同时保留穿越防护。
          */
         private fun serveRuffleAsset(path: String?): WebResourceResponse {
@@ -974,14 +1016,7 @@ object BrowserEngine {
             // 路径穿越防护：只允许 assets/ruffle/ 下的直接文件名
             if (name.isEmpty() || name.contains("..") || name.contains('/')) return notFound()
             return try {
-                // v1.3.1：双路径兜底 —— assets/ruffle/<file>（源码目录直
-                // 打包）失败再试 assets/<file>（白名单暂存根路径），两套
-                // 打包布局都能命中，引擎资产永不 404。
-                val stream = try {
-                    ctx.assets.open("$RUFFLE_ASSET_DIR/$name")
-                } catch (_: Exception) {
-                    ctx.assets.open(name)
-                }
+                val stream = ctx.assets.open("$RUFFLE_ASSET_DIR/$name")
                 val mime = when {
                     name.endsWith(".wasm", true) -> "application/wasm"
                     name.endsWith(".js", true) -> "text/javascript"
@@ -1000,160 +1035,6 @@ object BrowserEngine {
             }
         }
 
-        /** 信任所有 SSL 证书的 SSLSocketFactory（仅用于 SWF 下载兼容老 CDN） */
-        @Volatile
-        private var sslFactory: javax.net.ssl.SSLSocketFactory? = null
-
-        private fun trustAllSslSocketFactory(): javax.net.ssl.SSLSocketFactory {
-            return sslFactory ?: synchronized(this) {
-                sslFactory ?: try {
-                    val tm = object : X509TrustManager {
-                        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-                    }
-                    val sslContext = SSLContext.getInstance("TLS")
-                    sslContext.init(null, arrayOf(tm), SecureRandom())
-                    sslContext.socketFactory
-                } catch (_: Exception) {
-                    HttpsURLConnection.getDefaultSSLSocketFactory()
-                }.also { sslFactory = it }
-            }
-        }
-
-        /** 原生下载 SWF，返回带 CORS 头的响应（缓存 + 重试 + SSL 兼容 + 请求头转发） */
-        private fun interceptSwf(url: String, request: WebResourceRequest?): WebResourceResponse? {
-            // 0. CORS 预检（OPTIONS）：直接返回 200 + CORS 头，不下载文件
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && request?.method == "OPTIONS") {
-                return WebResourceResponse(
-                    "text/plain", "UTF-8", 200, "OK",
-                    swfCorsHeaders, ByteArrayInputStream(ByteArray(0))
-                )
-            }
-
-            // 1. 尝试 URL 列表：不强制 HTTP→HTTPS 升级（部分 4399 CDN 不支持 HTTPS）；
-            //    HTTP 先试原始 HTTP，失败再试 HTTPS；HTTPS 直接用
-            val tryUrls = when {
-                url.startsWith("https://") -> listOf(url)
-                url.startsWith("http://") -> listOf(url, "https://" + url.substring(7))
-                else -> listOf(url)
-            }
-
-            // 2. 缓存命中直接返回（Ruffle 可能同时发起多个相同 SWF 请求）
-            for (u in tryUrls) {
-                swfCache[u]?.let { cached ->
-                    return WebResourceResponse(
-                        "application/x-shockwave-flash", null, 200, "OK",
-                        swfCorsHeaders, ByteArrayInputStream(cached)
-                    )
-                }
-            }
-
-            // 3. 逐个 URL 尝试下载（每个最多重试 3 次，服务端 5xx 退避重试）
-            for (swfUrl in tryUrls) {
-                for (attempt in 1..3) {
-                    try {
-                        val conn = java.net.URL(swfUrl).openConnection() as java.net.HttpURLConnection
-                        if (conn is HttpsURLConnection) {
-                            conn.sslSocketFactory = trustAllSslSocketFactory()
-                            conn.hostnameVerifier = HostnameVerifier { _, _ -> true }
-                        }
-                        conn.connectTimeout = 10000
-                        conn.readTimeout = 20000
-                        conn.requestMethod = "GET"
-                        conn.instanceFollowRedirects = true
-
-                        // 转发原始请求头（排除自行设置的/条件请求的/CORS 相关的）
-                        request?.requestHeaders?.forEach { (key, value) ->
-                            val lk = key.lowercase()
-                            if (lk !in setOf(
-                                    "cookie", "referer", "range", "if-modified-since", "if-none-match",
-                                    "accept-encoding", "origin", "access-control-request-method",
-                                    "access-control-request-headers", "host", "content-length"
-                                )
-                            ) {
-                                conn.setRequestProperty(key, value)
-                            }
-                        }
-                        if (request?.requestHeaders?.none { it.key.equals("User-Agent", true) } != false) {
-                            conn.setRequestProperty("User-Agent", desktopUserAgent())
-                        }
-                        conn.setRequestProperty("Accept", "*/*")
-                        // 不请求 gzip，避免手动解压
-                        conn.setRequestProperty("Accept-Encoding", "identity")
-
-                        // 转发 Cookie（防防盗链/登录态丢失）
-                        try {
-                            val cookies = CookieManager.getInstance().getCookie(swfUrl)
-                            if (!cookies.isNullOrEmpty()) {
-                                conn.setRequestProperty("Cookie", cookies)
-                            }
-                        } catch (_: Exception) {
-                        }
-
-                        // 防盗链 Referer
-                        if (swfUrl.contains("4399.com")) {
-                            conn.setRequestProperty("Referer", "https://www.4399.com/")
-                        } else {
-                            try {
-                                val u = java.net.URI(swfUrl)
-                                conn.setRequestProperty("Referer", "${u.scheme}://${u.host}/")
-                            } catch (_: Exception) {
-                                conn.setRequestProperty("Referer", swfUrl)
-                            }
-                        }
-
-                        conn.connect()
-                        val responseCode = conn.responseCode
-                        if (responseCode in 200..299) {
-                            // v1.3.1：超大 SWF 交给 WebView 自身流式加载
-                            //（全量缓冲进 ByteArray 会 OOM / Int 溢出）
-                            val declared = conn.contentLength
-                            if (declared > MAX_SWF_BYTES) {
-                                conn.disconnect()
-                                return null
-                            }
-                            val data = conn.inputStream.readBytes()
-                            if (data.size > MAX_SWF_BYTES) {
-                                conn.disconnect()
-                                return null
-                            }
-                            if (swfCache.size >= 10) swfCache.clear()
-                            swfCache[swfUrl] = data
-                            // v1.3.0：嗅探器回写真实大小（资源面板展示）
-                            ResourceSniffer.updateSize(url, data.size.toLong())
-                            return WebResourceResponse(
-                                "application/x-shockwave-flash", null,
-                                200, "OK", swfCorsHeaders, ByteArrayInputStream(data)
-                            )
-                        } else if (responseCode in 500..599 && attempt < 3) {
-                            Thread.sleep(500L * attempt)
-                            continue
-                        } else {
-                            break // 换下一个 URL（4xx/其他非 5xx 错误不重试）
-                        }
-                    } catch (_: Exception) {
-                        if (attempt < 3) Thread.sleep(500L * attempt)
-                    }
-                }
-                // 重试期间其他线程可能已成功下载
-                swfCache[swfUrl]?.let { cached ->
-                    return WebResourceResponse(
-                        "application/x-shockwave-flash", null, 200, "OK",
-                        swfCorsHeaders, ByteArrayInputStream(cached)
-                    )
-                }
-            }
-
-            // 4. 全部失败（v1.3.1 关键修复）：返回 null 让 WebView 用自身网络栈
-            //    重发原始请求。旧实现返回 502 + 空体 —— 原生下载一旦失败
-            //    （CDN 拒绝转发头 / TLS 指纹 / 证书链 / 重定向链等），Ruffle
-            //    拿到空 SWF 直接报错，「Ruffle 对网站的内置」全灭。null 兜底：
-            //    同源场景 WebView 可正常加载（自身网络栈正常处理重定向/
-            //    gzip/证书）；跨域场景与旧版同样失败，但不会更糟。
-            return null
-        }
-
         companion object {
             // ================================================================
             // v2.14.4：Ruffle 引擎本地化（虚拟域 → assets 拦截，零 CDN 依赖）
@@ -1163,56 +1044,6 @@ object BrowserEngine {
 
             /** assets 内引擎目录（ruffle.js + 2×core.js + 2×wasm） */
             private const val RUFFLE_ASSET_DIR = "ruffle"
-
-            /** 本地虚拟域基址（publicPath + script src 同源，核心/wasm 相对解析） */
-            private const val RUFFLE_LOCAL_BASE = "https://$RUFFLE_VIRTUAL_HOST/ruffle/"
-
-            /** 网络后备源（本地 404/拦截失效时逐级尝试；npmmirror 国内可达性最好）。
-             *  v2.14.7：0.3.0 → 0.5.0 —— 0.3.0（2022）Avm2/AS3 支持不成熟，
-             *  4399 新游戏（AS3）引擎能加载但无法执行 → 预加载进度条永远
-             *  卡住；后备源同步升级避免降级到坏版本 */
-            private const val RUFFLE_CDN_MIRROR = "https://registry.npmmirror.com/@ruffle-rs/ruffle/0.5.0/files/"
-            private const val RUFFLE_CDN_JSDELIVR = "https://cdn.jsdelivr.net/npm/@ruffle-rs/ruffle@0.5.0/"
-
-            /** v1.3.1：单文件 SWF 全量缓冲上限（超过交 WebView 自身流式加载，防 OOM） */
-            private const val MAX_SWF_BYTES = 128 * 1024 * 1024
-
-            /**
-             * WebGL 像素管线守卫（v2.14.4，HTML5 游戏灰屏兜底）：
-             * 嵌入式合成环境下存在"上下文创建成功、绘制调用不报错、但像素
-             * 读回全零"的坏 GPU 路径 —— 游戏照跑（有声音）画面永远空白。
-             * document-start 同步 clear→readPixels 探测；损坏时让
-             * getContext('webgl') 返回 null，Ruffle/页面自动回退 canvas2d。
-             */
-            private const val WEBGL_GUARD_SCRIPT = """
-                (function(){
-                  if (window.__webglGuard) return;
-                  window.__webglGuard = true;
-                  var broken = false;
-                  try {
-                    var c = document.createElement('canvas');
-                    var gl = c.getContext('webgl') || c.getContext('experimental-webgl');
-                    if (gl) {
-                      gl.clearColor(1.0, 0.0, 0.0, 1.0);
-                      gl.clear(gl.COLOR_BUFFER_BIT);
-                      var px = new Uint8Array(4);
-                      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
-                      broken = !(px[0] > 200);
-                      try { gl.getExtension('WEBGL_lose_context').loseContext(); } catch(e) {}
-                    }
-                  } catch(e) { broken = true; }
-                  if (broken) {
-                    try {
-                      var orig = HTMLCanvasElement.prototype.getContext;
-                      HTMLCanvasElement.prototype.getContext = function(type){
-                        if (type && /webgl/i.test(String(type))) return null;
-                        return orig.apply(this, arguments);
-                      };
-                      window.__webglDisabled = true;
-                    } catch(e) {}
-                  }
-                })();
-            """
 
             /**
              * View Transitions API 补丁（gamehtml，所有页面通用）。
@@ -1282,7 +1113,18 @@ object BrowserEngine {
                   }
                   applyViewport();
                   if(firstInstall&&window.MutationObserver){
-                    try{new MutationObserver(applyViewport).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['content','name']});}catch(e){}
+                    var observer=new MutationObserver(function(){applyViewport();watchViewport();});
+                    function watchViewport(){
+                      observer.disconnect();
+                      if(document.head){
+                        observer.observe(document.head,{childList:true});
+                        var meta=document.querySelector('meta[name="viewport"]');
+                        if(meta)observer.observe(meta,{attributes:true,attributeFilter:['content','name']});
+                      }else if(document.documentElement){
+                        observer.observe(document.documentElement,{childList:true});
+                      }
+                    }
+                    watchViewport();
                   }
                 })();
             """
@@ -1328,173 +1170,6 @@ object BrowserEngine {
                         ', minimum-scale=0.01, maximum-scale=10.0, user-scalable=yes';
                     head.appendChild(meta);
                   } catch(e) {}
-                })();
-            """
-
-            /**
-             * 伪造 Flash 插件支持（gamehtml FLASH_FAKE_SUPPORT_SCRIPT，完整移植）。
-             * 让 4399 等页面检测到浏览器"有 Flash 插件"，从而创建 <object> 元素；
-             * 之后 Ruffle polyfill 把 <object>/<embed> 替换为 Canvas 播放器。
-             * 必须在页面 JS 执行前注入（onPageStarted），零网络开销。
-             */
-            private const val FLASH_FAKE_SUPPORT_SCRIPT = """
-                (function(){
-                  if (window.__flashFaked) return;
-                  window.__flashFaked = true;
-                  try {
-                    var fakePlugin = {
-                      name: 'Shockwave Flash',
-                      filename: 'libflashplayer.so',
-                      description: 'Shockwave Flash 32.0 r0',
-                      length: 1,
-                      0: { type: 'application/x-shockwave-flash', suffixes: 'swf', description: 'Shockwave Flash' }
-                    };
-                    fakePlugin.namedItem = function(n) { return (n === 'Shockwave Flash') ? fakePlugin : null; };
-                    fakePlugin.item = function(i) { return i === 0 ? fakePlugin : null; };
-                    fakePlugin.refresh = function() {};
-                    var plugins = navigator.plugins || {};
-                    if (plugins.namedItem) { fakePlugin.namedItem = function(n) { return (n === 'Shockwave Flash') ? fakePlugin : plugins.namedItem.call(plugins, n); }; }
-                    if (plugins.item) { fakePlugin.item = function(i) { return i === 0 ? fakePlugin : plugins.item.call(plugins, i); }; }
-                    Object.defineProperty(navigator, 'plugins', {
-                      get: function() {
-                        var p = plugins;
-                        if (!p['Shockwave Flash']) {
-                          try { p['Shockwave Flash'] = fakePlugin; p[0] = fakePlugin; } catch(e) {}
-                        }
-                        p.length = Math.max(p.length || 0, 1);
-                        return p;
-                      },
-                      configurable: true
-                    });
-                    var fakeMime = { type: 'application/x-shockwave-flash', suffixes: 'swf', description: 'Shockwave Flash', enabledPlugin: fakePlugin };
-                    var mimes = navigator.mimeTypes || {};
-                    Object.defineProperty(navigator, 'mimeTypes', {
-                      get: function() {
-                        if (!mimes['application/x-shockwave-flash']) {
-                          try { mimes['application/x-shockwave-flash'] = fakeMime; } catch(e) {}
-                        }
-                        return mimes;
-                      },
-                      configurable: true
-                    });
-                    window.ActiveXObject = function(name) {
-                      if (name && /ShockwaveFlash/i.test(name)) return { SetVariable: function(){} };
-                      throw new Error('Not supported');
-                    };
-                  } catch(e) {}
-                })();
-            """
-
-            /**
-             * Ruffle 引擎链式加载器（v2.14.4 重写：本地 assets 优先，
-             * npmmirror / jsdelivr 网络后备；v2.14.5 移植 GameBox 字体修复；
-             * v2.14.7 引擎资产整体升级）：注入为 window.__linboxLoadRuffle()，
-             * 幂等（加载中/已加载直接返回），每次尝试同步更新 publicPath
-             *（core/wasm 相对它解析）。旧版固定 jsdelivr —— 国内网络 TLS
-             * 掐断时 Flash 游戏区永远空白。
-             *
-             * v2.14.7（关键修复：本地加载卡进度条）：旧本地资产 = 官方
-             * 0.3.0 正式版（MD5 逐一比对确认），Avm2/AS3 支持不成熟 ——
-             * 4399 新游戏（AS3）引擎加载成功但无法执行，预加载进度条永远
-             * 卡住（用户实测“一直进度条”）。本次整体替换为 GameBox 同源
-             * nightly 构建（用户在 GameBox 上实测可用）；simhei.ttf 两边
-             * MD5 一致保持不变；CDN 后备同步升级 0.5.0。
-             *
-             * 字体修复（GameBox RuffleInjector.fontConfigScript 同款）：
-             * Flash 游戏多用设备字体（中文 SWF 无内嵌字形），Ruffle 默认
-             * 只带拉丁字形 → 中文显示方块。fontSources 指向本地 simhei.ttf
-             * （虚拟域供给，与引擎源无关恒本地），defaultFonts 把七类
-             * 设备字体全映射 SimHei（v2.14.7 补 chineseSimplified，与
-             * GameBox swf 版对齐），中文正常渲染。
-             */
-            private const val RUFFLE_CHAIN_SCRIPT = """
-                (function(){
-                  if (window.__linboxLoadRuffle) return;
-                  var BASE = {
-                    "polyfills": true,
-                    "autoplay": "on",
-                    "unmuteOverlay": "visible",
-                    "letterbox": "fullscreen",
-                    "upgradeToHttps": false,
-                    "allowScriptAccess": true,
-                    "scale": "showAll",
-                    "quality": "high",
-                    "allowFullscreen": true,
-                    "splashScreen": true,
-                    "preloader": true,
-                    "logLevel": "warn",
-                    "maxExecutionDuration": {"secs": 15, "nanos": 0},
-                    "fontSources": ["$RUFFLE_LOCAL_BASE" + "simhei.ttf"],
-                    "defaultFonts": {
-                      "sans": ["SimHei"],
-                      "serif": ["SimHei"],
-                      "typewriter": ["SimHei"],
-                      "japaneseGothic": ["SimHei"],
-                      "japaneseGothicMono": ["SimHei"],
-                      "japaneseMincho": ["SimHei"],
-                      "chineseSimplified": ["SimHei"]
-                    }
-                  };
-                  var SOURCES = [
-                    "$RUFFLE_LOCAL_BASE",
-                    "$RUFFLE_CDN_MIRROR",
-                    "$RUFFLE_CDN_JSDELIVR"
-                  ];
-                  window.__linboxLoadRuffle = function(){
-                    if (window.__ruffleLoaded || window.__ruffleLoading) return;
-                    window.__ruffleLoading = true;
-                    function attempt(i){
-                      if (i >= SOURCES.length) {
-                        window.__ruffleLoading = false;
-                        console.error('[Ruffle] local assets and all CDN fallbacks failed');
-                        return;
-                      }
-                      window.RufflePlayer = window.RufflePlayer || {};
-                      var cfg = {};
-                      for (var k in BASE) cfg[k] = BASE[k];
-                      cfg.publicPath = SOURCES[i];
-                      window.RufflePlayer.config = cfg;
-                      var s = document.createElement('script');
-                      s.src = SOURCES[i] + 'ruffle.js';
-                      s.async = true;
-                      s.onload = function(){
-                        window.__ruffleLoaded = true;
-                        window.__ruffleLoading = false;
-                        try {
-                          var r = window.RufflePlayer.newest();
-                          if (r && r.init) r.init();
-                        } catch(e) {}
-                        window.__playSwf = function(url, base){
-                          try {
-                            var ruffle = window.RufflePlayer.newest();
-                            var player = ruffle.createPlayer();
-                            player.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;z-index:9999;background:#000;';
-                            document.body.appendChild(player);
-                            var opt = { url: url };
-                            if (base) opt.base = base;
-                            player.ruffle().load(opt);
-                          } catch(e) { console.error('[SWF] play error:', e); }
-                        };
-                        document.dispatchEvent(new CustomEvent('ruffleReady'));
-                      };
-                      s.onerror = function(){
-                        try { s.parentNode && s.parentNode.removeChild(s); } catch(e) {}
-                        attempt(i + 1);
-                      };
-                      (document.head || document.documentElement).appendChild(s);
-                    }
-                    attempt(0);
-                  };
-                })();
-            """
-
-            /**
-             * Ruffle 引擎加载入口（gamehtml RuffleInjector fullInjection 演化）：
-             * 链式加载器 + 立即触发。4399 域名页 onPageStarted 直载兜底用。
-             */
-            private const val RUFFLE_LOADER_SCRIPT = RUFFLE_CHAIN_SCRIPT + """
-                (function(){
-                  window.__linboxLoadRuffle();
                 })();
             """
 
@@ -1570,80 +1245,6 @@ object BrowserEngine {
             """
 
             /**
-             * Flash 元素懒加载探测器（LinBox 按 gamehtml 思路实现，v2.14.4
-             * 接入链式加载器）：
-             * DOMContentLoaded + MutationObserver 监测 —— 页面一旦出现
-             * <object>/<embed> Flash 元素（含 swfobject.embedSWF 动态创建的），
-             * 立即经 __linboxLoadRuffle（本地 assets 优先、CDN 后备）拉起引擎。
-             * 4399 域名页另有 onPageStarted 直载兜底。
-             */
-            private const val FLASH_DOM_DETECT_SCRIPT = RUFFLE_CHAIN_SCRIPT + """
-                (function(){
-                  if (window.__flashDomDetect) return;
-                  window.__flashDomDetect = true;
-                  function isFlashElement(el){
-                    var tag = (el.tagName || '').toLowerCase();
-                    if (tag !== 'object' && tag !== 'embed') return false;
-                    var type = (el.getAttribute('type') || '').toLowerCase();
-                    var classid = (el.getAttribute('classid') || '').toLowerCase();
-                    var source = el.getAttribute(tag === 'object' ? 'data' : 'src') || '';
-                    if (type.indexOf('application/x-shockwave-flash') >= 0 ||
-                        classid.indexOf('d27cdb6e') >= 0 || /\.swf(?:[?#]|$)/i.test(source)) return true;
-                    if (tag === 'object') {
-                      var params = el.getElementsByTagName('param');
-                      for (var i = 0; i < params.length; i++) {
-                        var name = (params[i].getAttribute('name') || '').toLowerCase();
-                        var value = params[i].getAttribute('value') || '';
-                        if ((name === 'movie' || name === 'src') &&
-                            (/\.swf(?:[?#]|$)/i.test(value) || type.indexOf('shockwave') >= 0)) return true;
-                      }
-                    }
-                    return false;
-                  }
-                  function check(){
-                    try {
-                      var elements = document.querySelectorAll('object,embed');
-                      for (var i = 0; i < elements.length; i++) {
-                        if (isFlashElement(elements[i])) {
-                          if (window.__linboxLoadRuffle) window.__linboxLoadRuffle();
-                          return;
-                        }
-                      }
-                    } catch(e) {}
-                  }
-                  if (document.readyState === 'loading') {
-                    document.addEventListener('DOMContentLoaded', check);
-                  }
-                  check();
-                  if (window.MutationObserver) {
-                    try {
-                      var mo = new MutationObserver(check);
-                      mo.observe(document, {
-                        childList: true,
-                        subtree: true,
-                        attributes: true,
-                        attributeFilter: ['type', 'data', 'src', 'classid', 'name', 'value']
-                      });
-                    } catch(e) {}
-                  }
-                })();
-            """
-
-            /**
-             * 4399 防盗链：伪造 document.referrer（gamehtml REFERER_SPOOF_SCRIPT）。
-             */
-            private const val REFERER_SPOOF_SCRIPT = """
-                (function(){
-                  try {
-                    Object.defineProperty(document, 'referrer', {
-                      get: function() { return 'https://www.4399.com/'; },
-                      configurable: true
-                    });
-                  } catch(e) {}
-                })();
-            """
-
-            /**
              * v1.3.1：DOM 下载链接扫描脚本（onPageFinished 注入，返回
              * 绝对 URL 数组，由 [TabWebViewClient.sniffDomLinks] 解析入库）。
              * 采集 a[href] / area[href] / embed[src] / object[data] /
@@ -1695,6 +1296,11 @@ object BrowserEngine {
     ) : WebChromeClient() {
 
         private fun isActive() = manager.activeTabId == tab.id
+
+        override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+            consoleMessage?.let { tab.flashDiagnostics.recordConsole(it.message(), it.sourceId()) }
+            return super.onConsoleMessage(consoleMessage)
+        }
 
         override fun onProgressChanged(view: WebView?, newProgress: Int) {
             if (isActive()) {

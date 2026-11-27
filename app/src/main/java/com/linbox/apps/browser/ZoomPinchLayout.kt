@@ -415,17 +415,6 @@ class ZoomPinchLayout @JvmOverloads constructor(
         }
     }
 
-    /**
-     * v2.19.2：3D 视角（鼠标视角模式）增量采集 —— 自 dispatchTouchEvent
-     * 入口调用（原在 onInterceptTouchEvent：依赖 WebView 触摸目标存在，
-     * interop 过滤器 stopDispatching / 无目标 MOVE 等场景下永不触发，
-     * "必须先点一下屏幕才能转视角"的根因之二）。
-     *
-     * 语义与原实现一致：旁路观察不拦截（页面照常收到 tap/click/touch），
-     * 单指拖动超 slop 后把增量喂给 View3dController 合成
-     * mousemove(movementX/Y)；多指（捏合仲裁优先）暂停，抬回单指可继续；
-     * 捏合接管态（MODE_PINCH）不采集。传入剥离后的自由指干净流时同样适用。
-     */
     private fun feedLookFromEvent(ev: MotionEvent) {
         if (!View3dController.enabled) return
         when (ev.actionMasked) {
@@ -765,7 +754,7 @@ class ZoomPinchLayout @JvmOverloads constructor(
         const val MAX_ZOOM = 1.0f
 
         /** viewport meta 注入最小间隔（ms）：防 JNI 排队堆积 */
-        private const val JS_INTERVAL_MS = 80L
+        private const val JS_INTERVAL_MS = 120L
 
         /** 手势状态机 */
         private const val MODE_IDLE = 0        // 无双指手势
@@ -820,8 +809,13 @@ class ZoomPinchLayout @JvmOverloads constructor(
                 //（= 窗口宽/画布宽，Chromium 按新约束钳制生效）
                 "var w=Math.round(S.cw/z);" +
                 "var sc=S.s0*z;" +
+                "var anchorX=window.scrollX+window.innerWidth/2;" +
+                "var anchorY=window.scrollY+window.innerHeight/2;" +
                 "S.meta.setAttribute('content'," +
                 "'width='+w+',minimum-scale='+sc+',maximum-scale='+sc+',user-scalable=yes');" +
+                "requestAnimationFrame(function(){try{" +
+                "window.scrollTo(Math.max(0,anchorX-window.innerWidth/2),Math.max(0,anchorY-window.innerHeight/2));" +
+                "}catch(e){}});" +
                 "}catch(e){}})()"
         }
 

@@ -130,6 +130,8 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
 
     // v5.0：手柄总开关（球菜单“开启手柄”需感知当前态）
     val gamepadEnabled by app.settingsStore.gamepadEnabled.collectAsState(initial = false)
+    val mouseControlMode by app.settingsStore.mouseControlMode.collectAsState(initial = "touch")
+    val mouseCursorEnabled by app.settingsStore.mouseCursorEnabled.collectAsState(initial = true)
     // v1.1.0（用户需求 2）：屏幕方向设置（竖屏/横屏/自动循环切换）
     val displayOrientation by app.settingsStore.displayOrientation.collectAsState(initial = "portrait")
     // LinBrowser 独立版：应用即浏览器 —— 浏览器组随内容组合常驻
@@ -331,6 +333,19 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
                         }
                         expanded = false
                     },
+                    BallChipItem(BallIconKind.GEAR, if (mouseCursorEnabled) "显示鼠标：开" else "显示鼠标：关",
+                        active = mouseCursorEnabled) {
+                        scope.launch { app.settingsStore.setMouseCursorEnabled(!mouseCursorEnabled) }
+                        expanded = false
+                    },
+                    BallChipItem(BallIconKind.TOUCH, if (mouseControlMode == "trackpad") "触控板模式：开" else "触控板模式：关",
+                        active = mouseControlMode == "trackpad") {
+                        GamepadController.releaseAllKeys()
+                        scope.launch {
+                            app.settingsStore.setMouseControlMode(if (mouseControlMode == "trackpad") "touch" else "trackpad")
+                        }
+                        expanded = false
+                    },
                     BallChipItem(BallIconKind.SETTINGS, "手柄设置") {
                         GamepadController.releaseAllKeys()
                         GamepadController.settingsOpen = true
@@ -397,12 +412,56 @@ private fun GamepadFloatingBallContent(onPersistConfig: (() -> Unit)?) {
                             com.linbox.apps.browser.BrowserQuickBus.showHistory?.invoke()
                             expanded = false
                         },
+                        BallChipItem(BallIconKind.ADD, "标签页",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.showTabs != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.showTabs?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.SETTINGS, "Flash诊断",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.showFlashInfo != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.showFlashInfo?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.FOLDER, "打开本地SWF",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.openSwf != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.openSwf?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.FOLDER, "SWF资源目录",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.openSwfDirectory != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.openSwfDirectory?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.PASTE, "设置背景",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.pickBackground != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.pickBackground?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.CLOSE, "恢复背景",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.clearBackground != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.clearBackground?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.KEYBOARD, "手机键盘",
+                            enabled = com.linbox.apps.browser.BrowserQuickBus.showSystemKeyboard != null) {
+                            com.linbox.apps.browser.BrowserQuickBus.showSystemKeyboard?.invoke()
+                            expanded = false
+                        },
                         BallChipItem(
                             BallIconKind.UA,
                             if (com.linbox.apps.browser.BrowserQuickBus.uaIsDesktop) "手机模式" else "桌面模式",
                             enabled = com.linbox.apps.browser.BrowserQuickBus.toggleUaMode != null
                         ) {
                             com.linbox.apps.browser.BrowserQuickBus.toggleUaMode?.invoke()
+                            expanded = false
+                        },
+                        BallChipItem(BallIconKind.GEAR, "浏览：${when (com.linbox.apps.browser.BrowserQuickBus.browserMode) { "compatibility" -> "兼容"; "speed" -> "极速"; else -> "默认" }}") {
+                            val next = when (com.linbox.apps.browser.BrowserQuickBus.browserMode) {
+                                "default" -> "compatibility"
+                                "compatibility" -> "speed"
+                                else -> "default"
+                            }
+                            com.linbox.apps.browser.BrowserQuickBus.setBrowserMode?.invoke(next)
                             expanded = false
                         },
                         BallChipItem(

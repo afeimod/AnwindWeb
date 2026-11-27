@@ -62,9 +62,8 @@ internal fun LayoutCoordinates.boundsInWindowCompat(): Rect {
  *   [registerPassthrough] 登记直通区，落在区内的真实手指原样放行。
  *
  * ## 手势集（与 v2.19.5 一致）
- * - 单指滑动：指针相对移动（× [TrackpadController.SENSITIVITY]）
- * - 轻点（< 320ms 且各指位移 < 24dp slop）：指针处注入单击
- * - 按住不动 ≥ 320ms：默认进入拖拽（注入 DOWN，滑动跟随 MOVE，抬手 UP）；
+ * - 单指移动：指针直接跟随手指；轻点（< 长按阈值且位移 < 24dp slop）注入单击
+ * - 按住不动 ≥ 系统长按阈值：默认进入拖拽（注入 DOWN，滑动跟随 MOVE，抬手 UP）；
  *   右键手势设为"长按"时改为在指针位置呼出右键菜单（[onContextMenu]）
  * - 双指滑动（超 16dp slop）：指针处注入滚轮
  * - 双指轻点（< 450ms、未滚动、未超 slop）：回调 [onContextMenu]
@@ -203,6 +202,7 @@ object TrackpadRouter {
         startPositions[id] = p
         lastPositions[id] = p
         lastCentroid = p
+        MouseController.update(p.x, p.y)
         scheduleLongPress()
     }
 
@@ -271,14 +271,18 @@ object TrackpadRouter {
             // ---- 单指：移动指针；拖拽态同时注入 MOVE ----
             for (i in 0 until ev.pointerCount) {
                 val id = ev.getPointerId(i)
-                val last = lastPositions[id] ?: continue
+                if (id !in lastPositions) continue
                 val p = Offset(ev.getX(i), ev.getY(i))
+                val last = lastPositions[id] ?: p
+                val delta = p - last
                 lastPositions[id] = p
-                moveCursorBy(p - last)
+                moveCursorBy(delta)
+                val target = view ?: return
+                val cursor = MouseController.position
                 if (dragMode) {
-                    val v = view ?: return
-                    val cursor = MouseController.position
-                    TrackpadController.injectDragMove(v, cursor.x, cursor.y)
+                    TrackpadController.injectMouseDragMove(target, cursor.x, cursor.y)
+                } else {
+                    TrackpadController.injectMouseMove(target, cursor.x, cursor.y)
                 }
                 break // 只跟随第一个仍登记的指针（首见指已登记、零跳变）
             }
@@ -303,7 +307,7 @@ object TrackpadRouter {
                 dragMode -> {
                     dragMode = false
                     MouseController.press(false)
-                    TrackpadController.injectDragUp(v, cursor.x, cursor.y)
+                    TrackpadController.injectMouseDragUp(v, cursor.x, cursor.y)
                 }
                 maxPointers == 1 && !moved && !longPressFired && duration < longPressMs -> {
                     TrackpadController.tapClick(v, cursor.x, cursor.y)
@@ -330,7 +334,7 @@ object TrackpadRouter {
             dragMode = false
             MouseController.press(false)
             val cursor = MouseController.position
-            TrackpadController.injectDragUp(v, cursor.x, cursor.y)
+            TrackpadController.injectMouseDragUp(v, cursor.x, cursor.y)
         }
         resetSession()
     }
@@ -364,7 +368,7 @@ object TrackpadRouter {
             MouseController.press(true)
             val v = view ?: return@Runnable
             val cursor = MouseController.position
-            TrackpadController.injectDragDown(v, cursor.x, cursor.y)
+            TrackpadController.injectMouseDragDown(v, cursor.x, cursor.y)
         }
     }
 
@@ -379,16 +383,14 @@ object TrackpadRouter {
 
     // ===== 工具 =====
 
-    /** 指针相对移动（灵敏度放大 + clamp 屏内） */
     private fun moveCursorBy(delta: Offset) {
         if (delta.getDistance() <= 0.01f) return
-        val v = view ?: return
-        val cur = MouseController.position
-        val nx = (cur.x + delta.x * TrackpadController.SENSITIVITY)
-            .coerceIn(0f, v.width.toFloat())
-        val ny = (cur.y + delta.y * TrackpadController.SENSITIVITY)
-            .coerceIn(0f, v.height.toFloat())
-        MouseController.update(nx, ny)
+        val root = view ?: return
+        val current = MouseController.position
+        MouseController.update(
+            (current.x + delta.x * TrackpadController.SENSITIVITY).coerceIn(0f, root.width.toFloat()),
+            (current.y + delta.y * TrackpadController.SENSITIVITY).coerceIn(0f, root.height.toFloat())
+        )
     }
 
     /** 本事件全部指针的质心（滚轮增量基准） */

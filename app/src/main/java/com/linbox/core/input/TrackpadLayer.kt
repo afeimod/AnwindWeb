@@ -85,7 +85,7 @@ object TrackpadController {
     /** 轻点板面 = 指针处一次完整单击（视觉按压与注入绑定为原子动作） */
     fun tapClick(view: View, x: Float, y: Float) {
         pressing = true
-        injectClick(view, x, y)
+        injectMouseClick(view, x, y)
         pressing = false
     }
 
@@ -111,6 +111,46 @@ object TrackpadController {
 
     // ===== 拖拽流：DOWN（长按超时）→ MOVE…（跟随指针）→ UP（抬手） =====
     private var dragDownTime = 0L
+    private var heldMouseDownTime = 0L
+    private var heldMouseView: View? = null
+    private var heldMouseButtons = 0
+
+    fun pressHeldMouseButton(view: View, x: Float, y: Float, button: Int) {
+        if (heldMouseButtons and button != 0) return
+        val firstButton = heldMouseButtons == 0
+        heldMouseButtons = heldMouseButtons or button
+        heldMouseView = view
+        if (firstButton) {
+            heldMouseDownTime = SystemClock.uptimeMillis()
+            dispatchMouseEvent(view, MotionEvent.ACTION_DOWN, heldMouseDownTime, x, y, heldMouseButtons)
+        } else {
+            dispatchMouseEvent(view, MotionEvent.ACTION_MOVE, heldMouseDownTime, x, y, heldMouseButtons)
+        }
+    }
+
+    fun moveHeldMouse(view: View, x: Float, y: Float) {
+        val downTime = heldMouseDownTime
+        val buttons = heldMouseButtons
+        if (downTime != 0L && buttons != 0) {
+            dispatchMouseEvent(heldMouseView ?: view, MotionEvent.ACTION_MOVE, downTime, x, y, buttons)
+        } else {
+            injectMouseMove(view, x, y)
+        }
+    }
+
+    fun releaseHeldMouseButton(view: View, x: Float, y: Float, button: Int) {
+        if (heldMouseButtons and button == 0) return
+        heldMouseButtons = heldMouseButtons and button.inv()
+        val target = heldMouseView ?: view
+        val downTime = heldMouseDownTime
+        if (heldMouseButtons == 0) {
+            heldMouseDownTime = 0L
+            heldMouseView = null
+            dispatchMouseEvent(target, MotionEvent.ACTION_UP, downTime, x, y, 0)
+        } else {
+            dispatchMouseEvent(target, MotionEvent.ACTION_MOVE, downTime, x, y, heldMouseButtons)
+        }
+    }
 
     fun injectDragDown(view: View, x: Float, y: Float) {
         dragDownTime = SystemClock.uptimeMillis()
@@ -139,6 +179,59 @@ object TrackpadController {
         view.post {
             runCatching {
                 dispatchTouch(view, MotionEvent.ACTION_UP, dt, elapsed, x, y)
+            }
+        }
+    }
+
+    fun injectMouseMove(view: View, x: Float, y: Float) {
+        dispatchMouseEvent(view, MotionEvent.ACTION_HOVER_MOVE, SystemClock.uptimeMillis(), x, y, 0)
+    }
+
+    fun injectMouseClick(view: View, x: Float, y: Float) {
+        val now = SystemClock.uptimeMillis()
+        dispatchMouseEvent(view, MotionEvent.ACTION_DOWN, now, x, y, MotionEvent.BUTTON_PRIMARY)
+        dispatchMouseEvent(view, MotionEvent.ACTION_UP, now, x, y, 0)
+    }
+
+    fun injectMouseDragDown(view: View, x: Float, y: Float) {
+        dragDownTime = SystemClock.uptimeMillis()
+        dispatchMouseEvent(view, MotionEvent.ACTION_DOWN, dragDownTime, x, y, MotionEvent.BUTTON_PRIMARY)
+    }
+
+    fun injectMouseDragMove(view: View, x: Float, y: Float) {
+        val downTime = dragDownTime
+        if (downTime == 0L) return
+        dispatchMouseEvent(view, MotionEvent.ACTION_MOVE, downTime, x, y, MotionEvent.BUTTON_PRIMARY)
+    }
+
+    fun injectMouseDragUp(view: View, x: Float, y: Float) {
+        val downTime = dragDownTime
+        if (downTime == 0L) return
+        dragDownTime = 0L
+        dispatchMouseEvent(view, MotionEvent.ACTION_UP, downTime, x, y, 0)
+    }
+
+    private fun dispatchMouseEvent(view: View, action: Int, downTime: Long, x: Float, y: Float, buttons: Int) {
+        view.post {
+            runCatching {
+                val props = arrayOf(MotionEvent.PointerProperties().apply {
+                    id = INJECTED_POINTER_ID
+                    toolType = MotionEvent.TOOL_TYPE_MOUSE
+                })
+                val coords = arrayOf(MotionEvent.PointerCoords().apply {
+                    this.x = x
+                    this.y = y
+                    pressure = if (buttons == 0) 0f else 1f
+                    size = 1f
+                })
+                val now = SystemClock.uptimeMillis()
+                val event = MotionEvent.obtain(
+                    downTime, now, action, 1, props, coords, 0, buttons,
+                    1f, 1f, 0, 0, InputDevice.SOURCE_MOUSE, 0
+                )
+                if (action == MotionEvent.ACTION_HOVER_MOVE) view.dispatchGenericMotionEvent(event)
+                else dispatchTouchAt(view, event, x, y)
+                event.recycle()
             }
         }
     }

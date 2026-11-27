@@ -97,6 +97,10 @@ fun GamepadSettingsWindow(modifier: Modifier = Modifier) {
                 type = type, label = "十字键",
                 posX = 0.8f, posY = 0.5f, sizeDp = 80f
             )
+            GamepadController.ElementType.TOUCHPAD -> GamepadController.PadElement(
+                type = type, label = "鼠标触控板",
+                posX = 0.5f, posY = 0.5f, sizeDp = 150f
+            )
         }
         GamepadController.updateElements(elements + newElement)
         GamepadController.selectElement(newElement.id)
@@ -243,6 +247,7 @@ fun GamepadSettingsWindow(modifier: Modifier = Modifier) {
                     GpChip("＋ 按钮", false) { addElement(GamepadController.ElementType.BUTTON) }
                     GpChip("＋ 摇杆", false) { addElement(GamepadController.ElementType.JOYSTICK) }
                     GpChip("＋ 十字键", false) { addElement(GamepadController.ElementType.DPAD) }
+                    GpChip("＋ 鼠标触控板", false) { addElement(GamepadController.ElementType.TOUCHPAD) }
                 }
 
                 // ===== 选中元素编辑器 =====
@@ -278,7 +283,9 @@ fun GamepadSettingsWindow(modifier: Modifier = Modifier) {
                     }
 
                     // 摇杆/十字键方向模式
-                    if (selected.type != GamepadController.ElementType.BUTTON) {
+                    if (selected.type == GamepadController.ElementType.JOYSTICK ||
+                        selected.type == GamepadController.ElementType.DPAD
+                    ) {
                         GpSubLabel("方向模式（${if (selected.type == GamepadController.ElementType.JOYSTICK) "摇杆" else "十字键"} 上下左右输出）")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             GpChip(
@@ -516,6 +523,7 @@ private fun GpElementChip(
                 GamepadController.ElementType.BUTTON -> "●"
                 GamepadController.ElementType.JOYSTICK -> "◎"
                 GamepadController.ElementType.DPAD -> "✛"
+                GamepadController.ElementType.TOUCHPAD -> "▦"
             },
             color = if (selected) Color(0xFF5EEAD4) else Color(0xFF9FC4D8),
             fontSize = 11.sp
@@ -587,6 +595,7 @@ private fun typeLabel(element: GamepadController.PadElement): String = when (ele
     GamepadController.ElementType.BUTTON -> "按钮"
     GamepadController.ElementType.JOYSTICK -> "摇杆"
     GamepadController.ElementType.DPAD -> "十字键"
+    GamepadController.ElementType.TOUCHPAD -> "鼠标触控板"
 }
 
 // ============================================================

@@ -1,6 +1,5 @@
 package com.linbox.shellui
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,8 +10,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import com.linbox.LinBoxApp
 import com.linbox.apps.browser.BrowserContent
@@ -49,27 +48,15 @@ fun BrowserShell(sharedText: String? = null) {
     val app = LinBoxApp.get()
     val density = LocalDensity.current
 
-    // ===== 输入设置（触控板模式 / 虚拟鼠标指针 / 右键手势）=====
-    val mouseCursorEnabled by app.settingsStore.mouseCursorEnabled.collectAsState(initial = true)
     val mouseControlMode by app.settingsStore.mouseControlMode.collectAsState(initial = "touch")
-    val mouseRightClick by app.settingsStore.mouseRightClick.collectAsState(initial = "twofinger")
+    val mouseCursorEnabled by app.settingsStore.mouseCursorEnabled.collectAsState(initial = true)
 
-    // View 层触控板路由器接线：
-    // 触控板模式的手势仲裁由 MainActivity.dispatchTouchEvent → TrackpadRouter 完成。
     SideEffect {
-        val newEnabled = mouseControlMode == "trackpad"
-        if (TrackpadRouter.enabled && !newEnabled) TrackpadRouter.onDisabled()
-        TrackpadRouter.enabled = newEnabled
-        TrackpadRouter.longPressRightClick = mouseRightClick == "longpress"
+        if (TrackpadRouter.enabled) TrackpadRouter.onDisabled()
+        TrackpadRouter.enabled = false
         TrackpadRouter.density = density.density
     }
 
-    // 虚拟鼠标指针初始化（触控板模式下指针即鼠标本体，强制初始化）
-    SideEffect {
-        if (mouseCursorEnabled || mouseControlMode == "trackpad") {
-            MouseController.initialize(0f, 0f)
-        }
-    }
 
     // ===== 虚拟手柄配置全局一次加载（防覆盖层迟到加载回写旧值）=====
     LaunchedEffect(Unit) {
@@ -80,6 +67,12 @@ fun BrowserShell(sharedText: String? = null) {
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .onSizeChanged { size ->
+                MouseController.setBounds(size.width.toFloat(), size.height.toFloat())
+                if (mouseCursorEnabled || mouseControlMode == "trackpad") {
+                    MouseController.initialize(size.width / 2f, size.height / 2f)
+                }
+            }
             .background(Color.Black)
     ) {
         // ===== 1. 浏览器全屏页 =====
@@ -112,7 +105,6 @@ fun BrowserShell(sharedText: String? = null) {
  */
 @Composable
 private fun BrowserPage(sharedText: String?) {
-    val context = LocalContext.current
     val args = remember {
         buildMap {
             if (!sharedText.isNullOrBlank()) put("url", sharedText)
@@ -120,12 +112,6 @@ private fun BrowserPage(sharedText: String?) {
     }
     val host = remember(args) {
         PageHost(args, "browser", "浏览器")
-    }
-
-    // 系统返回：网页历史后退 > 视频全屏退出 > 页面级全屏退出 > 本兜底
-    //（收起应用回桌面，会话存活 —— 与 LinBox"回主页"语义对齐为最小破坏）
-    BackHandler(enabled = true) {
-        (context as? android.app.Activity)?.moveTaskToBack(true)
     }
 
     Box(

@@ -53,6 +53,7 @@ class SettingsStore(private val context: Context) {
         val DISPLAY_ORIENTATION = stringPreferencesKey("display_orientation")
         // 浏览器桌面/手机模式：desktop / mobile
         val BROWSER_UA_MODE = stringPreferencesKey("browser_ua_mode")
+        val BROWSER_PERFORMANCE_MODE = stringPreferencesKey("browser_performance_mode")
         // v1.2.0（用户需求 5）：自定义主页背景 —— 空 = 默认；
         // "image:/绝对路径" 静态图 / "video:/绝对路径" 循环静音视频
         val HOMEPAGE_BG = stringPreferencesKey("homepage_bg")
@@ -237,6 +238,8 @@ class SettingsStore(private val context: Context) {
         .map { it[Keys.DISPLAY_ORIENTATION] ?: "portrait" }
     val browserUaMode: Flow<String> = context.appPrefs.data
         .map { it[Keys.BROWSER_UA_MODE] ?: "desktop" }
+    val browserPerformanceMode: Flow<String> = context.appPrefs.data
+        .map { it[Keys.BROWSER_PERFORMANCE_MODE] ?: "default" }
     // v1.2.0（用户需求 5）：自定义主页背景（图/视频）；空串 = 默认纯色
     val homepageBg: Flow<String> = context.appPrefs.data
         .map { it[Keys.HOMEPAGE_BG] ?: "" }
@@ -413,6 +416,11 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setBrowserUaMode(mode: String) {
         context.appPrefs.edit { it[Keys.BROWSER_UA_MODE] = mode }
+    }
+
+    suspend fun setBrowserPerformanceMode(mode: String) {
+        val value = mode.takeIf { it in setOf("default", "speed", "compatibility") } ?: "default"
+        context.appPrefs.edit { it[Keys.BROWSER_PERFORMANCE_MODE] = value }
     }
 
     // v1.2.0（用户需求 5）：自定义主页背景 —— "image:路径" / "video:路径" / 空串清除

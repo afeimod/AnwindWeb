@@ -16,8 +16,9 @@ android {
         applicationId = "com.linbox.browser"
         minSdk = 24
         targetSdk = 28
-        versionCode = 8
-        versionName = "1.3.1"
+        versionCode = 45
+        versionName = "1.5.18"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // 无原生代码（termux PTY / DAC 桥已随容器栈移除）
         ndk {
@@ -33,37 +34,8 @@ android {
         disable += "ExpiredTargetSdkVersion"
     }
 
-    // ruffle 资产按白名单打包（过滤旧版双引擎死重，与 LinBox 同规则）
-    val ruffleWhitelist = listOf(
-        "ruffle.js",
-        "core.ruffle.831c4f4a93befb9e84af.js",
-        "core.ruffle.0875e44536e955474b0c.js",
-        "1ef41ff58c9763bed027.wasm",
-        "63468f5322aed2e768a8.wasm",
-        "simhei.ttf"
-    )
-    val ruffleDir = layout.projectDirectory.dir("src/main/assets/ruffle")
-    val ruffleStage = layout.buildDirectory.dir("generated/ruffleAssets")
-
-    val prepareRuffleAssets by tasks.registering {
-        doLast {
-            val outDir = ruffleStage.get().asFile
-            outDir.mkdirs()
-            val src = ruffleDir.asFile
-            if (src.isDirectory) {
-                src.listFiles()?.forEach { f ->
-                    if (ruffleWhitelist.contains(f.name)) {
-                        f.copyTo(File(outDir, f.name), overwrite = true)
-                    }
-                }
-            }
-        }
-    }
-
-    sourceSets {
-        getByName("main") {
-            assets.srcDir(ruffleStage)
-        }
+    androidResources {
+        noCompress += "wasm"
     }
 
     buildTypes {
@@ -102,6 +74,7 @@ dependencies {
     implementation(composeBom)
 
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.webkit:webkit:1.11.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.2")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.2")
     implementation("androidx.activity:activity-compose:1.9.0")

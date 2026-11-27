@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.MotionEvent
+import android.webkit.CookieManager
 import android.view.WindowManager as SysWindowManager
 import com.linbox.core.input.TrackpadRouter
 import com.linbox.core.theme.LocalBaseDensity
@@ -200,6 +201,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onPause() {
+        runCatching { CookieManager.getInstance().flush() }
+        super.onPause()
     }
 
     /**
